@@ -1,0 +1,74 @@
+name: Taiwan Stock Reports
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Report mode to generate
+        required: true
+        default: daily
+        type: choice
+        options:
+          - daily
+          - weekly
+  schedule:
+    # Asia/Taipei 08:00, Monday-Friday.
+    - cron: "0 0 * * 1-5"
+    # Asia/Taipei Sunday 21:00.
+    - cron: "0 13 * * 0"
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      PYTHONIOENCODING: utf-8
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      GITHUB_REPORT_REPOSITORY: ${{ vars.GITHUB_REPORT_REPOSITORY || 'c20021013/taiwan-stock-reports' }}
+      GITHUB_REPORT_TOKEN: ${{ secrets.GITHUB_REPORT_TOKEN || github.token }}
+      LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+      LINE_TARGET_ID: ${{ secrets.LINE_TARGET_ID }}
+      REPORT_PUBLIC_BASE_URL: ${{ vars.REPORT_PUBLIC_BASE_URL || 'https://c20021013.github.io/taiwan-stock-reports' }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        run: |
+          python -m py_compile stock_report.py notify_report.py publish_report.py validate_report.py
+          python -m unittest discover -s tests -v
+
+      - name: Choose report mode
+        id: mode
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.schedule }}" == "0 13 * * 0" ]]; then
+            echo "mode=weekly" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=daily" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate report
+        run: python stock_report.py --mode "${{ steps.mode.outputs.mode }}"
+
+      - name: Validate generated report
+        run: python validate_report.py --mode "${{ steps.mode.outputs.mode }}"
+
+      - name: Publish HTML to GitHub Pages repository
+        run: python publish_report.py --mode "${{ steps.mode.outputs.mode }}"
+
+      - name: Send notification
+        run: python notify_report.py --mode "${{ steps.mode.outputs.mode }}"
