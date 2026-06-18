@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent
 REPORTS_DIR = ROOT / "reports"
 CACHE_DIR = ROOT / "cache"
 CONFIG_PATH = ROOT / "config.json"
-USER_AGENT = "TaiwanStockResearch/1.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 TaiwanStockResearch/1.0"; HTTP_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*", "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8", "Cache-Control": "no-cache", "Pragma": "no-cache", "Referer": "https://www.twse.com.tw/"}
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
 TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -134,7 +134,7 @@ def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
         if age <= max_age_minutes * 60:
             return json.loads(cache_path.read_text(encoding="utf-8"))
 
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(url, headers=HTTP_HEADERS)
     context = ssl.create_default_context()
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         # Some TWSE certificates fail OpenSSL strict mode while still passing
@@ -142,7 +142,7 @@ def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
         context.verify_flags &= ~ssl.VERIFY_X509_STRICT
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
-            raw = response.read().decode("utf-8")
+            raw = response.read().decode("utf-8-sig").strip()
         data = json.loads(raw)
         cache_path.write_text(
             json.dumps(data, ensure_ascii=False), encoding="utf-8"
