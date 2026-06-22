@@ -12,10 +12,10 @@ on:
           - daily
           - weekly
   schedule:
-    # Asia/Taipei 08:00, Monday-Friday.
-    - cron: "0 0 * * 1-5"
-    # Asia/Taipei Sunday 21:00.
-    - cron: "0 13 * * 0"
+    # Start before peak cron traffic, then wait until Asia/Taipei 08:00.
+    - cron: "50 23 * * 0-4"
+    # Start before peak cron traffic, then wait until Asia/Taipei Sunday 21:00.
+    - cron: "50 12 * * 0"
 
 permissions:
   contents: write
@@ -30,7 +30,7 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       GITHUB_REPORT_REPOSITORY: ${{ vars.GITHUB_REPORT_REPOSITORY || 'c20021013/taiwan-stock-reports' }}
-      GITHUB_REPORT_TOKEN: ${{ secrets.GITHUB_REPORT_TOKEN || github.token }}
+      GITHUB_REPORT_TOKEN: ${{ github.token }}
       LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
       LINE_TARGET_ID: ${{ secrets.LINE_TARGET_ID }}
       REPORT_PUBLIC_BASE_URL: ${{ vars.REPORT_PUBLIC_BASE_URL || 'https://c20021013.github.io/taiwan-stock-reports' }}
@@ -44,6 +44,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore market data cache
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: market-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            market-data-${{ runner.os }}-
+
       - name: Run unit tests
         run: |
           python -m py_compile stock_report.py notify_report.py publish_report.py validate_report.py
@@ -55,19 +63,53 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event.schedule }}" == "0 13 * * 0" ]]; then
+          elif [[ "${{ github.event.schedule }}" == "50 12 * * 0" ]]; then
             echo "mode=weekly" >> "$GITHUB_OUTPUT"
           else
             echo "mode=daily" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Wait until scheduled report time
+        if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          from datetime import datetime, timedelta, timezone
+
+          now = datetime.now(timezone.utc)
+          if os.environ["SCHEDULE"] == "50 12 * * 0":
+              target = now.replace(hour=13, minute=0, second=0, microsecond=0)
+          else:
+              target_day = now + timedelta(days=1) if now.hour == 23 else now
+              target = target_day.replace(hour=0, minute=0, second=0, microsecond=0)
+          delay = max(0, int((target - now).total_seconds()))
+          print(f"Waiting {delay} seconds for the report time")
+          time.sleep(delay)
+          PY
+
       - name: Generate report
-        run: python stock_report.py --mode "${{ steps.mode.outputs.mode }}"
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if python stock_report.py --mode "${{ steps.mode.outputs.mode }}"; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              delay=$((attempt * 30))
+              echo "Report generation failed; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          exit 1
 
       - name: Validate generated report
         run: python validate_report.py --mode "${{ steps.mode.outputs.mode }}"
 
       - name: Publish HTML to GitHub Pages repository
+        continue-on-error: true
         run: python publish_report.py --mode "${{ steps.mode.outputs.mode }}"
 
       - name: Send notification
