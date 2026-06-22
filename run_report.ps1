@@ -44,21 +44,29 @@ try {
     if ($ExitCode -ne 0) {
         throw "Report generation failed with exit code $ExitCode"
     }
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $Python ".\publish_report.py" --mode $Mode 2>&1 | ForEach-Object {
         $Line = "$_"
         Write-Output $Line
         Add-Content -LiteralPath $LogFile -Value $Line -Encoding UTF8
     }
-    if ($LASTEXITCODE -ne 0) {
+    $PublishExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $PreviousErrorActionPreference
+    if ($PublishExitCode -ne 0) {
         "[$(Get-Date -Format s)] GitHub publish failed; local report is available." |
             Add-Content -LiteralPath $LogFile -Encoding UTF8
     }
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $Python ".\notify_report.py" --mode $Mode 2>&1 | ForEach-Object {
         $Line = "$_"
         Write-Output $Line
         Add-Content -LiteralPath $LogFile -Value $Line -Encoding UTF8
     }
-    if ($LASTEXITCODE -ne 0) {
+    $NotificationExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $PreviousErrorActionPreference
+    if ($NotificationExitCode -ne 0) {
         "[$(Get-Date -Format s)] Notification failed; local report is available." |
             Add-Content -LiteralPath $LogFile -Encoding UTF8
     }
