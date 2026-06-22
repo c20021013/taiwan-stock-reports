@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import html
 import json
 import math
@@ -26,7 +27,20 @@ ROOT = Path(__file__).resolve().parent
 REPORTS_DIR = ROOT / "reports"
 CACHE_DIR = ROOT / "cache"
 CONFIG_PATH = ROOT / "config.json"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 TaiwanStockResearch/1.0"; HTTP_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*", "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8", "Cache-Control": "no-cache", "Pragma": "no-cache", "Referer": "https://www.twse.com.tw/"}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 "
+    "TaiwanStockResearch/1.0"
+)
+HTTP_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://www.twse.com.tw/",
+}
+FETCH_RETRIES = 4
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
 TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -126,7 +140,7 @@ def ensure_dirs() -> None:
     CACHE_DIR.mkdir(exist_ok=True)
 
 
-def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
+def _fetch_json_legacy(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
     ensure_dirs()
     cache_path = CACHE_DIR / cache_name
     if cache_path.exists():
@@ -134,7 +148,7 @@ def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
         if age <= max_age_minutes * 60:
             return json.loads(cache_path.read_text(encoding="utf-8"))
 
-    request = urllib.request.Request(url, headers=HTTP_HEADERS)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     context = ssl.create_default_context()
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         # Some TWSE certificates fail OpenSSL strict mode while still passing
@@ -142,7 +156,7 @@ def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
         context.verify_flags &= ~ssl.VERIFY_X509_STRICT
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
-            raw = response.read().decode("utf-8-sig").strip()
+            raw = response.read().decode("utf-8")
         data = json.loads(raw)
         cache_path.write_text(
             json.dumps(data, ensure_ascii=False), encoding="utf-8"
@@ -153,6 +167,65 @@ def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
             print(f"警告：{url} 連線失敗，改用快取資料：{exc}", file=sys.stderr)
             return json.loads(cache_path.read_text(encoding="utf-8"))
         raise RuntimeError(f"無法取得資料：{url}: {exc}") from exc
+
+
+def fetch_json(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
+    ensure_dirs()
+    cache_path = CACHE_DIR / cache_name
+    if cache_path.exists():
+        age = time.time() - cache_path.stat().st_mtime
+        if age <= max_age_minutes * 60:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    context = ssl.create_default_context()
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        # Some TWSE certificates fail OpenSSL strict mode while still passing
+        # normal certificate and hostname verification.
+        context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+    last_exc: Exception | None = None
+    for attempt in range(1, FETCH_RETRIES + 1):
+        headers = dict(HTTP_HEADERS)
+        if "tpex.org.tw" in urllib.parse.urlparse(url).netloc.lower():
+            headers["Referer"] = "https://www.tpex.org.tw/"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(
+                request, timeout=30, context=context
+            ) as response:
+                raw = response.read().decode("utf-8-sig").strip()
+            if not raw:
+                raise ValueError("empty response")
+            data = json.loads(raw)
+            cache_path.write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8"
+            )
+            return data
+        except (
+            http.client.HTTPException,
+            urllib.error.URLError,
+            ConnectionError,
+            OSError,
+            TimeoutError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            last_exc = exc
+            if attempt < FETCH_RETRIES:
+                print(
+                    f"Warning: fetch attempt {attempt}/{FETCH_RETRIES} failed "
+                    f"for {url}: {exc}",
+                    file=sys.stderr,
+                )
+                time.sleep(min(2 * attempt, 8))
+
+    if cache_path.exists():
+        print(
+            f"Warning: using cached data for {url}; latest fetch failed: {last_exc}",
+            file=sys.stderr,
+        )
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    raise RuntimeError(f"Unable to fetch data: {url}: {last_exc}") from last_exc
 
 
 def fetch_optional_json(
