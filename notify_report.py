@@ -122,6 +122,12 @@ def build_summary(markdown: str, mode: str) -> str:
     return "\n".join(lines)
 
 
+def build_discord_notice(markdown: str) -> str:
+    title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
+    title = title_match.group(1) if title_match else "台股研究報告"
+    return f"{title}\n完整內容請開啟 HTML 報告。"
+
+
 def encode_multipart(
     fields: dict[str, str], files: list[tuple[str, Path]]
 ) -> tuple[bytes, str]:
@@ -235,6 +241,7 @@ def notify(mode: str, dry_run: bool = False) -> int:
     markdown_path, html_path = latest_report(mode)
     markdown = markdown_path.read_text(encoding="utf-8")
     summary = build_summary(markdown, mode)
+    discord_notice = build_discord_notice(markdown)
 
     discord_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     line_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -243,7 +250,7 @@ def notify(mode: str, dry_run: bool = False) -> int:
     report_url = public_report_url(public_base, html_path) if public_base else ""
 
     if dry_run:
-        print(summary)
+        print(discord_notice)
         print(f"\nHTML: {html_path}")
         print(f"Discord: {'configured' if discord_url else 'not configured'}")
         print(
@@ -262,7 +269,7 @@ def notify(mode: str, dry_run: bool = False) -> int:
     errors: list[str] = []
     if discord_url:
         try:
-            send_discord(discord_url, summary, html_path, report_url)
+            send_discord(discord_url, discord_notice, html_path, report_url)
             print(f"Discord notification sent: {html_path.name}")
             sent += 1
         except (urllib.error.URLError, RuntimeError) as exc:
