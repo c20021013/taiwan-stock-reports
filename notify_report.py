@@ -122,9 +122,11 @@ def build_summary(markdown: str, mode: str) -> str:
     return "\n".join(lines)
 
 
-def build_discord_notice(markdown: str) -> str:
+def build_discord_notice(markdown: str, html_path: Path | None = None) -> str:
     title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
     title = title_match.group(1) if title_match else "台股研究報告"
+    if html_path and html_path.stem not in title:
+        title = f"{title}｜{html_path.stem}"
     return f"{title}\n完整內容請開啟 HTML 報告。"
 
 
@@ -241,7 +243,7 @@ def notify(mode: str, dry_run: bool = False) -> int:
     markdown_path, html_path = latest_report(mode)
     markdown = markdown_path.read_text(encoding="utf-8")
     summary = build_summary(markdown, mode)
-    discord_notice = build_discord_notice(markdown)
+    discord_notice = build_discord_notice(markdown, html_path)
 
     discord_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     line_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
