@@ -34,6 +34,16 @@ SAMPLE = """# 台股每日研究報告
 
 
 class NotificationTests(unittest.TestCase):
+    def test_discord_notice_only_points_to_full_html(self):
+        notice = notify_report.build_discord_notice(SAMPLE)
+        self.assertEqual(
+            notice,
+            "台股每日研究報告\n完整內容請開啟 HTML 報告。",
+        )
+        self.assertNotIn("2330", notice)
+        self.assertNotIn("VIX", notice)
+        self.assertNotIn("建議投資", notice)
+
     def test_summary_contains_stock_and_etf(self):
         summary = notify_report.build_summary(SAMPLE, "daily")
         self.assertIn("2330 台積電", summary)
