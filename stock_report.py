@@ -53,6 +53,11 @@ TPEX_REVENUE_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
 TPEX_MATERIAL_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O"
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+TDCC_HOLDING_URL = "https://openapi.tdcc.com.tw/v1/opendata/1-5"
+TAIFEX_INSTITUTIONAL_URL = (
+    "https://openapi.taifex.com.tw/v1/"
+    "MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate"
+)
 
 
 @dataclass
@@ -78,8 +83,12 @@ class Security:
     events: list[str] = field(default_factory=list)
     news_titles: list[str] = field(default_factory=list)
     eps_yoy: float | None = None
-    oci_value: float | None = None
-    oci_date: str = ""
+    eps_period: str = ""
+    equity_change: float | None = None
+    equity_change_pct: float | None = None
+    equity_date: str = ""
+    large_holder_pct: float | None = None
+    large_holder_date: str = ""
     reasons: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
 
@@ -557,15 +566,63 @@ def market_health(
     )
 
 
+def latest_taifex_institutional_rows(
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    rows = fetch_optional_json(
+        TAIFEX_INSTITUTIONAL_URL,
+        "taifex_institutional_latest.json",
+        60,
+    )
+    return latest_group_rows(rows if isinstance(rows, list) else [], as_of)
+
+
+def load_non_institution_mtx_sentiment(as_of: date | None = None) -> str:
+    report_date = as_of or datetime.now(TAIPEI_TZ).date()
+    rows = [
+        row
+        for row in latest_taifex_institutional_rows(report_date)
+        if str(row.get("ContractCode", "")).strip() == "小型臺指期貨"
+    ]
+    if not rows:
+        return "資料暫缺：期交所小型臺指期貨三大法人資料尚未更新"
+    institutional_net = sum(
+        int(number(row.get("OpenInterest(Net)")) or 0) for row in rows
+    )
+    residual_net = -institutional_net
+    latest_date = parse_row_date(rows[0])
+    direction = "淨多" if residual_net > 0 else "淨空" if residual_net < 0 else "持平"
+    marker = direction_marker(residual_net)
+    return (
+        f"{latest_date.isoformat() if latest_date else '—'} 非三大法人小台指{direction} "
+        f"{marker} {abs(residual_net):,} 口"
+        "（由期交所三大法人未平倉反推，包含自然人與其他法人，非純散戶）"
+    )
+
+
 def parse_row_date(row: dict[str, Any]) -> date | None:
-    value = row.get("date") or row.get("Date")
+    value = (
+        row.get("date")
+        or row.get("Date")
+        or row.get("資料日期")
+        or row.get("\ufeff資料日期")
+    )
     if not value:
         return None
-    text = str(value)[:10]
+    text = str(value).strip()[:10]
+    if re.fullmatch(r"\d{8}", text):
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
     try:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def quarter_label(value: str) -> str:
+    parsed = parse_row_date({"date": value})
+    if not parsed:
+        return value
+    return f"{parsed.year}Q{(parsed.month - 1) // 3 + 1}"
 
 
 def rows_on_or_before(
@@ -692,7 +749,21 @@ def load_stock_news(symbol: str, as_of: date | None = None) -> list[str]:
     rows = rows_on_or_before(rows, report_date)
     titles: list[str] = []
     for row in sorted(rows, key=lambda item: str(item.get("date", "")), reverse=True):
-        title = clean_text(row.get("title"), 46)
+        source = clean_text(row.get("source"), 30).lower()
+        raw_title = clean_text(row.get("title"), 120)
+        if source in {"cmoney", "cmoney投資網誌"}:
+            continue
+        if any(
+            term in raw_title
+            for term in (
+                "股市爆料同學會",
+                "討論牆 | 盤中速報",
+                "未來操作指南",
+                "技術分析分享",
+            )
+        ):
+            continue
+        title = clean_text(raw_title, 46)
         if title and title not in titles:
             titles.append(title)
         if len(titles) >= 2:
@@ -716,40 +787,117 @@ def attach_news_and_financials(
         attach_financial_metrics(security, report_date)
 
 
+def statement_values_by_date(
+    rows: list[dict[str, Any]], as_of: date
+) -> dict[str, dict[str, float]]:
+    by_date: dict[str, dict[str, float]] = {}
+    for row in rows_on_or_before(rows, as_of):
+        parsed_date = parse_row_date(row)
+        value = number(row.get("value"))
+        item_type = str(row.get("type", ""))
+        if not parsed_date or value is None or not item_type:
+            continue
+        by_date.setdefault(parsed_date.isoformat(), {})[item_type] = value
+    return by_date
+
+
+def cumulative_eps_metrics(
+    by_date: dict[str, dict[str, float]]
+) -> tuple[float | None, str]:
+    eps_dates = sorted(
+        row_date for row_date, values in by_date.items() if "EPS" in values
+    )
+    if not eps_dates:
+        return None, ""
+    latest = date.fromisoformat(eps_dates[-1])
+    current_dates = [
+        row_date
+        for row_date in eps_dates
+        if date.fromisoformat(row_date).year == latest.year
+        and date.fromisoformat(row_date) <= latest
+    ]
+    previous_dates = [
+        f"{latest.year - 1}{row_date[4:]}" for row_date in current_dates
+    ]
+    if not current_dates or any(
+        row_date not in by_date or "EPS" not in by_date[row_date]
+        for row_date in previous_dates
+    ):
+        return None, quarter_label(latest.isoformat())
+    current_total = sum(by_date[row_date]["EPS"] for row_date in current_dates)
+    previous_total = sum(by_date[row_date]["EPS"] for row_date in previous_dates)
+    if previous_total == 0:
+        return None, quarter_label(latest.isoformat())
+    return pct_change(current_total, previous_total), quarter_label(latest.isoformat())
+
+
+def equity_change_metrics(
+    by_date: dict[str, dict[str, float]]
+) -> tuple[float | None, float | None, str]:
+    equity_dates = sorted(
+        row_date for row_date, values in by_date.items() if "Equity" in values
+    )
+    if len(equity_dates) < 2:
+        return None, None, quarter_label(equity_dates[-1]) if equity_dates else ""
+    previous, latest = equity_dates[-2:]
+    previous_value = by_date[previous]["Equity"]
+    latest_value = by_date[latest]["Equity"]
+    change = latest_value - previous_value
+    change_pct = pct_change(latest_value, previous_value) if previous_value else None
+    return change, change_pct, quarter_label(latest)
+
+
 def attach_financial_metrics(
     security: Security, as_of: date | None = None
 ) -> None:
     report_date = as_of or datetime.now(TAIPEI_TZ).date()
-    start = report_date - timedelta(days=520)
-    rows = finmind_data(
+    start = report_date - timedelta(days=900)
+    income_rows = finmind_data(
         "TaiwanStockFinancialStatements",
         start,
         f"financials_{security.symbol}_{start.isoformat()}.json",
         data_id=security.symbol,
         max_age_minutes=1440,
     )
-    by_date: dict[str, dict[str, float]] = {}
-    for row in rows_on_or_before(rows, report_date):
-        row_date = str(row.get("date", ""))
-        if not row_date:
-            continue
-        by_date.setdefault(row_date, {})[str(row.get("type", ""))] = float(
-            row.get("value", 0) or 0
-        )
-    eps_dates = sorted(
-        [row_date for row_date, values in by_date.items() if "EPS" in values]
+    income_by_date = statement_values_by_date(income_rows, report_date)
+    security.eps_yoy, security.eps_period = cumulative_eps_metrics(income_by_date)
+
+    balance_rows = finmind_data(
+        "TaiwanStockBalanceSheet",
+        start,
+        f"balance_{security.symbol}_{start.isoformat()}.json",
+        data_id=security.symbol,
+        max_age_minutes=1440,
     )
-    if eps_dates:
-        latest = eps_dates[-1]
-        previous_year = f"{int(latest[:4]) - 1}{latest[4:]}"
-        latest_eps = by_date[latest].get("EPS")
-        previous_eps = by_date.get(previous_year, {}).get("EPS")
-        if latest_eps is not None and previous_eps not in (None, 0):
-            security.eps_yoy = pct_change(latest_eps, previous_eps)
-        security.oci_value = by_date[latest].get(
-            "OtherComprehensiveIncomeAfterTaxThePeriod"
-        )
-        security.oci_date = latest
+    balance_by_date = statement_values_by_date(balance_rows, report_date)
+    (
+        security.equity_change,
+        security.equity_change_pct,
+        security.equity_date,
+    ) = equity_change_metrics(balance_by_date)
+
+
+def attach_tdcc_holdings(
+    candidates: list[Security], as_of: date | None = None
+) -> None:
+    report_date = as_of or datetime.now(TAIPEI_TZ).date()
+    rows = fetch_optional_json(TDCC_HOLDING_URL, "tdcc_holding_levels.json", 720)
+    eligible = rows_on_or_before(rows if isinstance(rows, list) else [], report_date)
+    dated_rows = [(parse_row_date(row), row) for row in eligible]
+    valid_dates = [row_date for row_date, _ in dated_rows if row_date]
+    if not valid_dates:
+        return
+    latest_date = max(valid_dates)
+    by_symbol = {item.symbol: item for item in candidates if not item.is_etf}
+    for row_date, row in dated_rows:
+        if row_date != latest_date or str(row.get("持股分級", "")).strip() != "15":
+            continue
+        symbol = str(row.get("證券代號", "")).strip()
+        security = by_symbol.get(symbol)
+        large_holder_pct = number(row.get("占集保庫存數比例%"))
+        if security and large_holder_pct is not None:
+            security.large_holder_pct = large_holder_pct
+            security.large_holder_date = latest_date.isoformat()
 
 
 def load_chip_context(
@@ -833,6 +981,24 @@ def load_chip_context(
                 previous.get("short_open_interest_balance_volume", 0) or 0
             )
             context.foreign_tx_net_delta = latest_net - previous_net
+
+    official_tx_rows = [
+        row
+        for row in latest_taifex_institutional_rows(report_date)
+        if str(row.get("ContractCode", "")).strip() == "臺股期貨"
+        and str(row.get("Item", "")).strip() == "外資及陸資"
+    ]
+    if official_tx_rows:
+        official_row = official_tx_rows[0]
+        official_date = parse_row_date(official_row)
+        official_net = int(number(official_row.get("OpenInterest(Net)")) or 0)
+        existing_date = parse_row_date({"date": context.futures_date})
+        if official_date and (existing_date is None or official_date >= existing_date):
+            previous_net = context.foreign_tx_net_open_interest
+            if existing_date and official_date > existing_date and previous_net is not None:
+                context.foreign_tx_net_delta = official_net - previous_net
+            context.futures_date = official_date.isoformat()
+            context.foreign_tx_net_open_interest = official_net
 
     option_rows = finmind_data(
         "TaiwanOptionInstitutionalInvestors",
@@ -1258,7 +1424,7 @@ def market_health_section(health: MarketHealth) -> list[str]:
         f"金融股 {pct_text(health.financial_ratio)}、"
         f"傳產股 {pct_text(health.traditional_ratio)}。"
         "用來監控資金是否過度集中在單一族群。",
-        f"- 散戶情緒：{health.retail_mtx_sentiment}。",
+        f"- 散戶情緒（小台代理指標）：{health.retail_mtx_sentiment}。",
         f"- 市場廣度：今日上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家、"
         f"平盤 {health.flat_count:,} 家，共 {breadth_total:,} 家。",
         f"- 站上 20 日線個股比例：候選池 {pct_text(above_ratio)} "
@@ -1422,13 +1588,22 @@ def stock_row_growth(security: Security) -> str:
 
 
 def stock_row_financial(security: Security) -> str:
-    oci = fmt_money_yi(security.oci_value) if security.oci_value is not None else "—"
-    if security.oci_date and oci != "—":
-        oci = f"{oci} ({security.oci_date})"
+    eps_yoy = fmt(security.eps_yoy, "%")
+    if security.eps_period and eps_yoy != "—":
+        eps_yoy = f"{eps_yoy} ({security.eps_period})"
+    equity_change = "—"
+    if security.equity_change is not None:
+        equity_change = (
+            f"{direction_marker(security.equity_change)} "
+            f"{fmt_money_yi(security.equity_change)} / "
+            f"{fmt(security.equity_change_pct, '%')}"
+        )
+        if security.equity_date:
+            equity_change += f" ({security.equity_date})"
     return (
         f"| {security.symbol} | {security.name} | {security.score:.1f} | "
-        f"{combined_return_text(security)} | {fmt(security.eps_yoy, '%')} | "
-        f"{fmt(security.pb, '', 2)} | {oci} |"
+        f"{combined_return_text(security)} | {eps_yoy} | "
+        f"{fmt(security.pb, '', 2)} | {equity_change} |"
     )
 
 
@@ -1454,9 +1629,7 @@ def etf_exposure(security: Security) -> str:
 
 
 def etf_discount_note(security: Security) -> str:
-    if security.market == "TWSE":
-        return "買進前確認 iNAV 與市價折溢價，避免追高溢價"
-    return "買進前確認淨值、折溢價與追蹤誤差"
+    return "—（未取得同日官方 iNAV，不以收盤價估算）"
 
 
 def etf_row(security: Security) -> str:
@@ -1689,6 +1862,12 @@ def fmt(value: float | None, suffix: str = "", digits: int = 1) -> str:
 def detail_block(security: Security) -> str:
     reason_text = "；".join(security.reasons[:3])
     risk_text = "；".join(security.risks[:3])
+    holding_line = ""
+    if security.large_holder_pct is not None:
+        holding_line = (
+            f"- 集保千張以上持股比重：{security.large_holder_pct:.2f}%"
+            f"（{security.large_holder_date or '日期暫缺'}）\n"
+        )
     if security.is_etf:
         return (
             f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
@@ -1699,7 +1878,30 @@ def detail_block(security: Security) -> str:
             f"{fmt(security.metrics.get('ret20'), '%')}；近 60 日："
             f"{fmt(security.metrics.get('ret60'), '%')}\n"
             f"- 主要曝險：{etf_exposure(security)}\n"
-            f"- 折溢價提醒：{etf_discount_note(security)}\n"
+            f"- 實際折溢價幅度：{etf_discount_note(security)}\n"
+        )
+    if is_financial_stock(security):
+        eps_yoy = fmt(security.eps_yoy, "%")
+        if security.eps_period and eps_yoy != "—":
+            eps_yoy += f"（{security.eps_period}）"
+        equity_change = "—"
+        if security.equity_change is not None:
+            equity_change = (
+                f"{fmt_money_yi(security.equity_change)} / "
+                f"{fmt(security.equity_change_pct, '%')}"
+                f"（{security.equity_date or '日期暫缺'}）"
+            )
+        return (
+            f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
+            f"{security.label}\n\n"
+            f"- 建議原因：{reason_text}\n"
+            f"- 主要風險：{risk_text}\n"
+            f"- 最新收盤：{security.close:.2f}；近 20 日："
+            f"{fmt(security.metrics.get('ret20'), '%')}；近 60 日："
+            f"{fmt(security.metrics.get('ret60'), '%')}\n"
+            f"- 累計 EPS 年增率：{eps_yoy}；股淨比 (PB)：{fmt(security.pb, '', 2)}\n"
+            f"- 淨值季變動：{equity_change}\n"
+            f"{holding_line}"
         )
     return (
         f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
@@ -1712,6 +1914,7 @@ def detail_block(security: Security) -> str:
         f"- 月營收年增率 (YoY)：{fmt(security.revenue_yoy, '%')}；"
         f"累計營收年增率 (YoY)：{fmt(security.revenue_ytd_yoy, '%')}；"
         f"本益比 (PE)：{fmt(security.pe)}\n"
+        f"{holding_line}"
     )
 
 
@@ -1802,7 +2005,7 @@ def build_markdown(
             "",
             "### 金融類個股",
             "",
-            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值變動 |",
+            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值季變動 (QoQ) |",
             "|---|---|---:|---:|---:|---:|---|",
         ]
     )
@@ -1812,7 +2015,7 @@ def build_markdown(
             "",
             "## 建議投資 ETF 及原因",
             "",
-            "| 代碼 | 名稱 | 分數 | 建議 | 20D/60D報酬 | 主要曝險/成分股主題 | 折溢價提醒 | 建議原因 |",
+            "| 代碼 | 名稱 | 分數 | 建議 | 20D/60D報酬 | 主要曝險/成分股主題 | 實際折溢價幅度 (%) | 建議原因 |",
             "|---|---|---:|---|---:|---|---|---|",
         ]
     )
@@ -1834,6 +2037,8 @@ def build_markdown(
             "",
             "- TWSE OpenAPI：上市行情、估值、月營收與每日重大訊息。",
             "- TPEx OpenAPI：上櫃行情、估值、月營收與每日重大訊息。",
+            "- TAIFEX OpenAPI：臺股期貨三大法人與小型臺指期貨未平倉部位。",
+            "- TDCC OpenAPI：集保股權分散表與千張以上持股比重。",
             "- FinMind：個股與 ETF 歷史日行情、新聞、三大法人、期貨選擇權、融資融券與財報欄位。",
             "- Yahoo Finance Chart：美股指數、半導體、匯率、利率與商品價格。",
             "- 免費資料可能延遲、缺漏或更正；交易前應核對公開資訊觀測站與交易所。",
@@ -1942,8 +2147,10 @@ def run(mode: str) -> tuple[Path, Path]:
     candidates = select_candidates(securities, config)
     add_histories(candidates, config, report_date)
     attach_news_and_financials(candidates, report_date)
+    attach_tdcc_holdings(candidates, report_date)
     international = load_international_context(report_date)
     health = market_health(securities, candidates)
+    health.retail_mtx_sentiment = load_non_institution_mtx_sentiment(report_date)
     chips = load_chip_context(candidates, report_date)
     markdown = build_markdown(mode, candidates, generated_at, international, health, chips)
     title = report_title(mode, report_date)

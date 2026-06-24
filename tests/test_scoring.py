@@ -1,5 +1,6 @@
 import unittest
 from datetime import date, datetime
+from unittest import mock
 
 import stock_report
 
@@ -295,6 +296,120 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in latest], ["report-day"])
 
+    def test_latest_group_rows_accepts_compact_official_dates(self):
+        rows = [
+            {"Date": "20260623", "name": "report-day"},
+            {"Date": "20260625", "name": "future"},
+        ]
+
+        latest = stock_report.latest_group_rows(rows, date(2026, 6, 24))
+
+        self.assertEqual([row["name"] for row in latest], ["report-day"])
+
+    def test_financial_metrics_use_cumulative_eps_and_true_equity_change(self):
+        income = {
+            "2024-03-31": {"EPS": 1.0},
+            "2024-06-30": {"EPS": 1.0},
+            "2024-09-30": {"EPS": 1.0},
+            "2024-12-31": {"EPS": 1.0},
+            "2025-03-31": {"EPS": 1.5},
+            "2025-06-30": {"EPS": 1.5},
+            "2025-09-30": {"EPS": 1.5},
+            "2025-12-31": {"EPS": 1.5},
+        }
+        balance = {
+            "2025-12-31": {"Equity": 100_000_000_000.0},
+            "2026-03-31": {"Equity": 110_000_000_000.0},
+        }
+
+        eps_yoy, eps_period = stock_report.cumulative_eps_metrics(income)
+        equity_change, equity_pct, equity_period = stock_report.equity_change_metrics(
+            balance
+        )
+
+        self.assertAlmostEqual(eps_yoy, 50.0)
+        self.assertEqual(eps_period, "2025Q4")
+        self.assertEqual(equity_change, 10_000_000_000.0)
+        self.assertAlmostEqual(equity_pct, 10.0)
+        self.assertEqual(equity_period, "2026Q1")
+
+    def test_mtx_sentiment_is_labeled_as_non_institution_residual(self):
+        rows = [
+            {
+                "Date": "20260623",
+                "ContractCode": "小型臺指期貨",
+                "Item": "自營商",
+                "OpenInterest(Net)": "-8002",
+            },
+            {
+                "Date": "20260623",
+                "ContractCode": "小型臺指期貨",
+                "Item": "投信",
+                "OpenInterest(Net)": "20",
+            },
+            {
+                "Date": "20260623",
+                "ContractCode": "小型臺指期貨",
+                "Item": "外資及陸資",
+                "OpenInterest(Net)": "-3553",
+            },
+        ]
+
+        with mock.patch.object(
+            stock_report, "latest_taifex_institutional_rows", return_value=rows
+        ):
+            result = stock_report.load_non_institution_mtx_sentiment(
+                date(2026, 6, 24)
+            )
+
+        self.assertIn("非三大法人小台指淨多", result)
+        self.assertIn("11,535 口", result)
+        self.assertIn("非純散戶", result)
+
+    def test_tdcc_holding_mapping_excludes_future_data(self):
+        security = stock_report.Security(
+            "2330", "台積電", "TWSE", 1000, 1, 1_000_000, 1_000_000_000
+        )
+        rows = [
+            {
+                "證券代號": "2330  ",
+                "占集保庫存數比例%": "85.22",
+                "\ufeff資料日期": "20260618",
+                "持股分級": "15",
+            },
+            {
+                "證券代號": "2330  ",
+                "占集保庫存數比例%": "99.99",
+                "\ufeff資料日期": "20260625",
+                "持股分級": "15",
+            },
+        ]
+
+        with mock.patch.object(stock_report, "fetch_optional_json", return_value=rows):
+            stock_report.attach_tdcc_holdings([security], date(2026, 6, 24))
+
+        self.assertEqual(security.large_holder_pct, 85.22)
+        self.assertEqual(security.large_holder_date, "2026-06-18")
+
+    def test_news_filter_rejects_forum_content(self):
+        rows = [
+            {
+                "date": "2026-06-23 12:00:00",
+                "source": "CMoney",
+                "title": "2330 台積電 - 未來操作指南 - 股市爆料同學會",
+            },
+            {
+                "date": "2026-06-23 10:00:00",
+                "source": "中央社",
+                "title": "台積電公布先進製程擴產計畫",
+            },
+        ]
+
+        with mock.patch.object(stock_report, "finmind_data", return_value=rows):
+            titles = stock_report.load_stock_news("2330", date(2026, 6, 24))
+
+        self.assertEqual(titles, ["台積電公布先進製程擴產計畫"])
+
     def test_etf_section_uses_etf_specific_columns(self):
         etf = stock_report.Security(
             "0050",
@@ -325,15 +440,15 @@ class ScoringTests(unittest.TestCase):
         )[0]
 
         self.assertIn("主要曝險/成分股主題", etf_section)
-        self.assertIn("折溢價提醒", etf_section)
-        self.assertIn("iNAV", etf_section)
+        self.assertIn("實際折溢價幅度 (%)", etf_section)
+        self.assertIn("未取得同日官方 iNAV", etf_section)
         self.assertIn("**25.0%** / **45.0%**", etf_section)
         self.assertNotIn("月營收YoY", etf_section)
         self.assertNotIn("| PE |", etf_section)
 
         detail_section = markdown.split("## 投資建議詳情", 1)[1]
         self.assertIn("主要曝險", detail_section)
-        self.assertIn("折溢價提醒", detail_section)
+        self.assertIn("實際折溢價幅度", detail_section)
         self.assertNotIn("月營收年增", detail_section)
         self.assertNotIn("本益比", detail_section)
 
@@ -365,7 +480,7 @@ class ScoringTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值變動 |",
+            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值季變動 (QoQ) |",
             markdown,
         )
         self.assertIn("本益比 (PE)", markdown)

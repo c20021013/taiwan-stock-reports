@@ -60,6 +60,11 @@ def validate(mode: str) -> list[str]:
         "月營收年增率 (YoY)",
         "本益比 (PE)",
         "股淨比 (PB)",
+        "淨值季變動 (QoQ)",
+        "實際折溢價幅度 (%)",
+        "非純散戶",
+        "TAIFEX OpenAPI",
+        "TDCC OpenAPI",
         "VIX",
     ]
     for text in required_text:
@@ -72,6 +77,8 @@ def validate(mode: str) -> list[str]:
         errors.append("Missing bold emphasis in Markdown or HTML")
     if "QQ" in markdown or "OCI／淨值變動" in markdown:
         errors.append("Ambiguous financial terminology is present")
+    if "股市爆料同學會" in markdown or "CMoney投資網誌" in markdown:
+        errors.append("Low-quality forum news is present")
 
     try:
         etf_section = section(
@@ -79,7 +86,10 @@ def validate(mode: str) -> list[str]:
         )
         if "月營收YoY" in etf_section or "| PE |" in etf_section:
             errors.append("ETF table still contains stock-only columns")
-        if "主要曝險/成分股主題" not in etf_section or "折溢價提醒" not in etf_section:
+        if (
+            "主要曝險/成分股主題" not in etf_section
+            or "實際折溢價幅度 (%)" not in etf_section
+        ):
             errors.append("ETF table is missing ETF-specific columns")
     except AssertionError as exc:
         errors.append(str(exc))
@@ -100,10 +110,10 @@ def validate(mode: str) -> list[str]:
     report_date = parse_report_date(markdown_path)
     if report_date:
         try:
-            chip_section = section(
-                markdown, "## 2.6 籌碼與信用交易動態", "## 建議投資股票及原因"
+            dated_sections = section(
+                markdown, "## 2.5 台股大盤與資金健康度", "## 建議投資股票及原因"
             )
-            for found in re.findall(r"20\d{2}-\d{2}-\d{2}", chip_section):
+            for found in re.findall(r"20\d{2}-\d{2}-\d{2}", dated_sections):
                 if date.fromisoformat(found) > report_date:
                     errors.append(
                         f"Chip data date {found} is later than report date {report_date}"
