@@ -496,6 +496,54 @@ class ScoringTests(unittest.TestCase):
 
         self.assertIn("<strong>25.0%</strong>", html)
 
+    def test_finance_report_dashboard_uses_existing_market_data(self):
+        security = stock_report.Security(
+            "2330",
+            "台積電",
+            "TWSE",
+            1000,
+            10,
+            1_000_000,
+            100_000_000,
+            pe=20,
+            revenue_yoy=25,
+            revenue_ytd_yoy=18,
+        )
+        security.score = 80
+        security.label = "建議投資"
+        security.reasons = ["公司事件：先進製程需求增加"]
+        health = stock_report.MarketHealth(
+            electronic_ratio=60,
+            financial_ratio=12,
+            traditional_ratio=28,
+            up_count=900,
+            down_count=600,
+            flat_count=80,
+        )
+        chips = stock_report.ChipContext(
+            institutional_date="2026-06-27",
+            institutional_total_net=12_000_000_000,
+        )
+        dashboard = stock_report.finance_report_dashboard(
+            "台股每日研究報告",
+            "daily",
+            [security],
+            datetime(2026, 6, 27, 8, 0, tzinfo=stock_report.TAIPEI_TZ),
+            health,
+            chips,
+        )
+        rendered = stock_report.markdown_to_html(
+            "# 台股每日研究報告\n\n## 市場內容",
+            "台股每日研究報告",
+            dashboard,
+        )
+
+        self.assertIn("候選標的月營收年增率", dashboard)
+        self.assertIn("市場廣度與壓力", dashboard)
+        self.assertIn("方法論與資料限制", dashboard)
+        self.assertNotIn("chart.js", rendered.lower())
+        self.assertEqual(rendered.count("<h1>台股每日研究報告</h1>"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

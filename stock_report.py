@@ -2053,7 +2053,179 @@ def inline_html(value: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
 
 
-def markdown_to_html(markdown: str, title: str) -> str:
+def dashboard_metric(label: str, value: str, detail: str, tone: str = "neutral") -> str:
+    return (
+        f'<article class="kpi-card kpi-{tone}">'
+        f'<p class="kpi-label">{html.escape(label)}</p>'
+        f'<p class="kpi-value">{html.escape(value)}</p>'
+        f'<p class="kpi-detail">{html.escape(detail)}</p>'
+        "</article>"
+    )
+
+
+def dashboard_revenue_chart(stocks: list[Security]) -> str:
+    rows = [item for item in stocks if item.revenue_yoy is not None][:6]
+    if not rows:
+        return '<p class="chart-empty">候選標的尚無可用月營收年增資料。</p>'
+    maximum = max(abs(item.revenue_yoy or 0) for item in rows) or 1
+    bars = []
+    for item in rows:
+        value = item.revenue_yoy or 0
+        width = min(100, abs(value) / maximum * 100)
+        direction = "up" if value >= 0 else "down"
+        bars.append(
+            '<div class="bar-row">'
+            f'<span class="bar-label">{html.escape(item.symbol)} {html.escape(item.name)}</span>'
+            '<span class="bar-track">'
+            f'<span class="bar-fill {direction}" style="width:{width:.1f}%"></span>'
+            "</span>"
+            f'<strong class="bar-value {direction}">{value:+.1f}%</strong>'
+            "</div>"
+        )
+    return "".join(bars)
+
+
+def dashboard_breadth_chart(health: MarketHealth) -> str:
+    total = health.up_count + health.down_count + health.flat_count
+    if not total:
+        return '<p class="chart-empty">市場廣度資料暫缺。</p>'
+    values = [
+        ("上漲", health.up_count, "up"),
+        ("平盤", health.flat_count, "flat"),
+        ("下跌", health.down_count, "down"),
+    ]
+    segments = "".join(
+        f'<span class="breadth-{tone}" style="width:{count / total * 100:.2f}%"></span>'
+        for _, count, tone in values
+        if count
+    )
+    labels = "".join(
+        f'<li><span class="legend-dot breadth-{tone}"></span>{label} {count:,} 家 '
+        f'({count / total * 100:.1f}%)</li>'
+        for label, count, tone in values
+    )
+    return f'<div class="breadth-track">{segments}</div><ul class="breadth-legend">{labels}</ul>'
+
+
+def dashboard_financial_rows(stocks: list[Security]) -> str:
+    if not stocks:
+        return '<tr><td colspan="7">候選標的資料暫缺。</td></tr>'
+    rows = []
+    for item in stocks[:8]:
+        earnings = (
+            fmt(item.eps_yoy, "%")
+            if is_financial_stock(item)
+            else fmt(item.revenue_ytd_yoy, "%")
+        )
+        valuation = (
+            f"PB {fmt(item.pb, '', 2)}"
+            if is_financial_stock(item)
+            else f"PE {fmt(item.pe, '', 1)}"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(item.symbol)}</td>"
+            f"<td>{html.escape(item.name)}</td>"
+            f"<td>{item.score:.1f}</td>"
+            f"<td>{fmt(item.revenue_yoy, '%')}</td>"
+            f"<td>{earnings}</td>"
+            f"<td>{html.escape(valuation)}</td>"
+            f"<td>{html.escape(item.label)}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def finance_report_dashboard(
+    title: str,
+    mode: str,
+    candidates: list[Security],
+    generated_at: datetime,
+    health: MarketHealth,
+    chips: ChipContext,
+) -> str:
+    """Render the finance-report skill as a self-contained report overview."""
+    stocks = sorted(
+        [item for item in candidates if not item.is_etf and item.score > 0],
+        key=lambda item: item.score,
+        reverse=True,
+    )
+    etfs = sorted(
+        [item for item in candidates if item.is_etf and item.score > 0],
+        key=lambda item: item.score,
+        reverse=True,
+    )
+    positive_revenue = sum(
+        1 for item in stocks if item.revenue_yoy is not None and item.revenue_yoy > 0
+    )
+    total_breadth = health.up_count + health.down_count + health.flat_count
+    breadth = (
+        f"{health.up_count:,} / {health.down_count:,}"
+        if total_breadth
+        else "資料暫缺"
+    )
+    institutional = chips.institutional_total_net
+    institutional_value = marked_money_yi(institutional)
+    institutional_detail = (
+        f"{chips.institutional_date or '資料日期暫缺'} 三大法人現貨合計"
+        if institutional is not None
+        else "三大法人資料暫缺"
+    )
+    sector_detail = (
+        f"電子 {pct_text(health.electronic_ratio)}｜金融 {pct_text(health.financial_ratio)}"
+    )
+    top_reason = stocks[0].reasons[0] if stocks and stocks[0].reasons else "等待公司事件與營收資料確認"
+    highlights = [
+        f"市場廣度：上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家，報告以全市場漲跌家數判讀盤面結構。",
+        f"營收動能：{positive_revenue}/{len(stocks)} 檔非金融候選標的月營收年增；月營收只作基本面線索，不單獨解釋股價。",
+        f"資金健康度：{sector_detail}；類股成交比重用於辨識資金是否過度集中。",
+        f"籌碼觀察：{institutional_detail}為 {institutional_value}，法人流向需和公司營運與重大訊息交叉確認。",
+        f"最高分候選：{stocks[0].symbol} {stocks[0].name}，首要研究線索為「{top_reason}」。" if stocks else "候選清單資料暫缺。",
+    ]
+    outlook = (
+        "下期重點驗證月營收年增能否延續、公司重大訊息是否支持需求或獲利改善，"
+        "並持續觀察外資現貨與台指期部位、國際利率與匯率。"
+    )
+    mode_label = "週度彙整" if mode == "weekly" else "每日盤後"
+    return f"""
+<section class="finance-dashboard" aria-label="財務總覽">
+  <header class="finance-masthead">
+    <p class="eyebrow">TAIWAN STOCK RESEARCH · {html.escape(mode_label)}</p>
+    <h1>{html.escape(title)}</h1>
+    <p>資料時間：{generated_at:%Y-%m-%d %H:%M}（Asia/Taipei）｜以公開資料建立的研究總覽</p>
+  </header>
+  <section class="kpi-grid" aria-label="核心 KPI">
+    {dashboard_metric("市場廣度", breadth, "上漲 / 下跌家數", "up" if health.up_count >= health.down_count else "down")}
+    {dashboard_metric("電子成交比重", pct_text(health.electronic_ratio), sector_detail, "neutral")}
+    {dashboard_metric("法人現貨合計", institutional_value, institutional_detail, "up" if (institutional or 0) > 0 else "down" if (institutional or 0) < 0 else "neutral")}
+    {dashboard_metric("研究候選", f"{len(stocks)} 檔 / {len(etfs)} 檔", "股票 / ETF", "neutral")}
+  </section>
+  <section class="dashboard-grid">
+    <article class="dashboard-panel">
+      <div class="panel-heading"><p>Revenue Momentum</p><h2>候選標的月營收年增率</h2></div>
+      {dashboard_revenue_chart(stocks)}
+    </article>
+    <article class="dashboard-panel">
+      <div class="panel-heading"><p>Market Breadth</p><h2>市場廣度與壓力</h2></div>
+      {dashboard_breadth_chart(health)}
+      <p class="chart-note">以漲跌家數替代企業燒錢指標，避免把不適用的公司財報概念套到台股大盤。</p>
+    </article>
+  </section>
+  <section class="dashboard-panel financial-summary">
+    <div class="panel-heading"><p>Financial Snapshot</p><h2>候選標的財務與估值摘要</h2></div>
+    <div class="table-scroll"><table><thead><tr><th>代碼</th><th>名稱</th><th>分數</th><th>月營收 YoY</th><th>累計營收／EPS YoY</th><th>估值</th><th>結論</th></tr></thead>
+    <tbody>{dashboard_financial_rows(stocks)}</tbody></table></div>
+  </section>
+  <section class="dashboard-grid">
+    <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
+    <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
+  </section>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+</section>
+"""
+
+
+def markdown_to_html(markdown: str, title: str, dashboard: str = "") -> str:
     blocks: list[str] = []
     in_table = False
     in_list = False
@@ -2090,6 +2262,8 @@ def markdown_to_html(markdown: str, title: str) -> str:
         elif line.startswith("## "):
             blocks.append(f"<h2>{inline_html(line[3:])}</h2>")
         elif line.startswith("# "):
+            if dashboard and line[2:] == title:
+                continue
             blocks.append(f"<h1>{inline_html(line[2:])}</h1>")
         elif line.startswith("> "):
             blocks.append(f"<blockquote>{inline_html(line[2:])}</blockquote>")
@@ -2107,18 +2281,32 @@ def markdown_to_html(markdown: str, title: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
+:root {{ color-scheme: light; --ink:#172033; --muted:#617087; --line:#dce3ed; --navy:#102a56; --panel:#ffffff; --canvas:#f4f7fb; --red:#cf3945; --green:#16835e; --gold:#d9a441; }}
+* {{ box-sizing: border-box; }}
 body {{ font-family: system-ui, "Microsoft JhengHei", sans-serif; max-width: 1180px;
-       margin: 32px auto; padding: 0 20px; color: #172033; line-height: 1.65; }}
-h1, h2, h3 {{ color: #102a56; }}
-blockquote {{ border-left: 4px solid #d9a441; margin: 16px 0; padding: 10px 16px;
-             background: #fff8e8; }}
-table {{ width: 100%; border-collapse: collapse; margin: 16px 0 28px; font-size: 14px; }}
-th, td {{ border: 1px solid #dce3ed; padding: 8px; text-align: left; }}
-th {{ background: #edf3fb; }}
-tr:nth-child(even) {{ background: #f8fafc; }}
+       margin: 32px auto; padding: 0 20px 56px; color: var(--ink); line-height: 1.65; background:var(--canvas); }}
+body > h1, body > h2, body > h3, body > p, body > ul, body > blockquote, body > table {{ background:var(--panel); }}
+h1, h2, h3 {{ color: var(--navy); }} h2 {{ margin-top: 40px; }}
+blockquote {{ border-left: 4px solid var(--gold); margin: 16px 0; padding: 10px 16px; background: #fff8e8; }}
+table {{ width: 100%; border-collapse: collapse; margin: 16px 0 28px; font-size: 14px; background:var(--panel); }}
+th, td {{ border: 1px solid var(--line); padding: 8px; text-align: left; vertical-align:top; }}
+th {{ background: #edf3fb; position: sticky; top: 0; z-index: 1; }} tr:nth-child(even) {{ background: #f8fafc; }}
+.finance-dashboard {{ margin:0 0 38px; }}
+.finance-masthead {{ padding:32px; border-radius:20px; color:#fff; background:linear-gradient(135deg,#102a56,#215a93 62%,#2f8b8b); box-shadow:0 12px 30px #102a5630; }}
+.finance-masthead h1 {{ margin:5px 0 8px; color:#fff; font-size:clamp(28px,4vw,44px); line-height:1.2; }} .finance-masthead p {{ margin:0; color:#e8f0fb; }}
+.eyebrow,.panel-heading p,.kpi-label {{ margin:0; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }} .finance-masthead .eyebrow {{ color:#b9d9ff; }}
+.kpi-grid,.dashboard-grid {{ display:grid; gap:16px; margin-top:16px; }} .kpi-grid {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} .dashboard-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+.kpi-card,.dashboard-panel {{ background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; box-shadow:0 4px 14px #102a5609; }}
+.kpi-card {{ border-top:4px solid #8ca0b8; }} .kpi-up {{ border-top-color:var(--red); }} .kpi-down {{ border-top-color:var(--green); }} .kpi-value {{ margin:7px 0 3px; color:var(--navy); font-size:25px; font-weight:800; }} .kpi-detail,.chart-note {{ margin:0; color:var(--muted); font-size:13px; }}
+.panel-heading h2 {{ margin:2px 0 18px; font-size:20px; }} .bar-row {{ display:grid; grid-template-columns:minmax(95px,1fr) 2fr 62px; gap:9px; align-items:center; margin:12px 0; font-size:13px; }} .bar-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .bar-track {{ height:10px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .bar-fill {{ display:block; height:100%; border-radius:inherit; }} .bar-fill.up {{ background:var(--red); }} .bar-fill.down {{ background:var(--green); }} .bar-value {{ text-align:right; }} .bar-value.up {{ color:var(--red); }} .bar-value.down {{ color:var(--green); }}
+.breadth-track {{ display:flex; height:24px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .breadth-up {{ background:var(--red); }} .breadth-flat {{ background:#9daabd; }} .breadth-down {{ background:var(--green); }} .breadth-legend {{ display:flex; flex-wrap:wrap; gap:12px; padding:0; margin:16px 0 0; list-style:none; font-size:13px; }} .legend-dot {{ display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; }}
+.financial-summary {{ margin-top:16px; }} .table-scroll {{ overflow-x:auto; }} .financial-summary table {{ margin:0; }} .highlight-list {{ margin:0; padding-left:20px; }} .highlight-list li {{ margin:10px 0; }} .outlook-copy {{ margin:0; font-size:16px; }} .methodology {{ margin-top:16px; padding:16px 20px; border:1px solid var(--line); border-radius:14px; background:#edf3fb; }} .methodology summary {{ color:var(--navy); cursor:pointer; font-weight:800; }} .methodology p {{ margin:12px 0 0; color:#43516a; }} .chart-empty {{ margin:0; color:var(--muted); }}
+@media (max-width:800px) {{ body {{ margin:0 auto; padding:12px 12px 38px; }} .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr 1fr; }} .finance-masthead {{ padding:24px; }} }}
+@media (max-width:520px) {{ .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr; }} .bar-row {{ grid-template-columns:90px 1fr 54px; gap:6px; }} table {{ font-size:12px; }} th,td {{ padding:6px; }} }}
 </style>
 </head>
 <body>
+{dashboard}
 {''.join(blocks)}
 </body>
 </html>
@@ -2156,10 +2344,13 @@ def run(mode: str) -> tuple[Path, Path]:
     title = report_title(mode, report_date)
     md_path, html_path = output_paths(mode, report_date)
     md_path.write_text(markdown, encoding="utf-8")
-    html_path.write_text(markdown_to_html(markdown, title), encoding="utf-8")
+    dashboard = finance_report_dashboard(
+        title, mode, candidates, generated_at, health, chips
+    )
+    html_path.write_text(markdown_to_html(markdown, title, dashboard), encoding="utf-8")
     (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")
     (REPORTS_DIR / "latest.html").write_text(
-        markdown_to_html(markdown, title), encoding="utf-8"
+        markdown_to_html(markdown, title, dashboard), encoding="utf-8"
     )
     return md_path, html_path
 
