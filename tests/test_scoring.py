@@ -168,6 +168,106 @@ class ScoringTests(unittest.TestCase):
         self.assertIn("半導體風險偏好改善", section)
         self.assertIn("殖利率下降", section)
 
+    def test_next_session_forecast_uses_probabilities_and_market_evidence(self):
+        indicators = [
+            stock_report.InternationalIndicator(
+                "sp500",
+                "S&P 500",
+                "^GSPC",
+                7000,
+                "2026-06-27",
+                change_1d=1.2,
+                change_5d=2.5,
+            ),
+            stock_report.InternationalIndicator(
+                "nasdaq",
+                "Nasdaq",
+                "^IXIC",
+                24000,
+                "2026-06-27",
+                change_1d=1.8,
+                change_5d=3.0,
+            ),
+            stock_report.InternationalIndicator(
+                "sox",
+                "SOX",
+                "^SOX",
+                8000,
+                "2026-06-27",
+                change_1d=2.4,
+                change_5d=4.0,
+            ),
+            stock_report.InternationalIndicator(
+                "usdtwd",
+                "美元／台幣",
+                "USDTWD=X",
+                29.5,
+                "2026-06-27",
+                change_1d=-0.4,
+            ),
+        ]
+        health = stock_report.MarketHealth(
+            up_count=900,
+            down_count=400,
+            flat_count=80,
+        )
+        chips = stock_report.ChipContext(
+            institutional_date="2026-06-27",
+            institutional_nets={"Foreign_Investor": 24_000_000_000},
+            futures_date="2026-06-27",
+            foreign_tx_net_open_interest=8_000,
+            foreign_tx_net_delta=3_500,
+        )
+
+        forecast = stock_report.estimate_next_session(
+            indicators,
+            health,
+            chips,
+            date(2026, 6, 28),
+        )
+        section = "\n".join(
+            stock_report.next_session_forecast_section(forecast)
+        )
+
+        self.assertEqual(forecast.label, "上漲")
+        self.assertGreater(forecast.up_probability, forecast.down_probability)
+        self.assertAlmostEqual(
+            forecast.up_probability
+            + forecast.flat_probability
+            + forecast.down_probability,
+            100.0,
+            places=1,
+        )
+        self.assertLessEqual(
+            max(
+                forecast.up_probability,
+                forecast.flat_probability,
+                forecast.down_probability,
+            ),
+            60.0,
+        )
+        self.assertIn("±0.3%", section)
+        self.assertIn("規則型情境推估", section)
+        self.assertIn("反證條件", section)
+
+    def test_next_session_forecast_falls_back_to_low_confidence_flat(self):
+        forecast = stock_report.estimate_next_session(
+            [],
+            stock_report.MarketHealth(),
+            stock_report.ChipContext(),
+        )
+
+        self.assertEqual(forecast.label, "平盤")
+        self.assertEqual(forecast.confidence, "低")
+        self.assertGreater(forecast.flat_probability, forecast.up_probability)
+        self.assertAlmostEqual(
+            forecast.up_probability
+            + forecast.flat_probability
+            + forecast.down_probability,
+            100.0,
+            places=1,
+        )
+
     def test_market_health_section_includes_requested_fields(self):
         health = stock_report.MarketHealth(
             electronic_ratio=55.1,
@@ -305,6 +405,11 @@ class ScoringTests(unittest.TestCase):
         latest = stock_report.latest_group_rows(rows, date(2026, 6, 24))
 
         self.assertEqual([row["name"] for row in latest], ["report-day"])
+
+    def test_parse_row_date_accepts_roc_market_date(self):
+        parsed = stock_report.parse_row_date({"Date": "1150626"})
+
+        self.assertEqual(parsed, date(2026, 6, 26))
 
     def test_financial_metrics_use_cumulative_eps_and_true_equity_change(self):
         income = {
@@ -540,6 +645,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertIn("候選標的月營收年增率", dashboard)
         self.assertIn("市場廣度與壓力", dashboard)
+        self.assertIn("次一交易日方向機率", dashboard)
         self.assertIn("方法論與資料限制", dashboard)
         self.assertNotIn("chart.js", rendered.lower())
         self.assertEqual(rendered.count("<h1>台股每日研究報告</h1>"), 1)

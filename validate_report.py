@@ -38,11 +38,15 @@ def section(markdown: str, heading: str, next_heading: str | None = None) -> str
     return body
 
 
-def parse_report_date(path: Path) -> date | None:
+def parse_report_date(path: Path, markdown: str = "") -> date | None:
     match = re.search(r"\d{4}-\d{2}-\d{2}", path.name)
-    if not match:
-        return None
-    return date.fromisoformat(match.group(0))
+    if match:
+        return date.fromisoformat(match.group(0))
+    generated = re.search(
+        r"產生時間：(\d{4}-\d{2}-\d{2})",
+        markdown,
+    )
+    return date.fromisoformat(generated.group(1)) if generated else None
 
 
 def validate(mode: str) -> list[str]:
@@ -53,6 +57,7 @@ def validate(mode: str) -> list[str]:
 
     required_text = [
         "## 今日盤後速覽 (TL;DR)",
+        "## 次一交易日大盤方向推估",
         "## 國際情勢與台股影響",
         "## 2.5 台股大盤與資金健康度",
         "## 2.6 籌碼與信用交易動態",
@@ -63,6 +68,7 @@ def validate(mode: str) -> list[str]:
         "淨值季變動 (QoQ)",
         "實際折溢價幅度 (%)",
         "非純散戶",
+        "市場行情資料日",
         "TAIFEX OpenAPI",
         "TDCC OpenAPI",
         "VIX",
@@ -79,6 +85,44 @@ def validate(mode: str) -> list[str]:
         errors.append("Ambiguous financial terminology is present")
     if "股市爆料同學會" in markdown or "CMoney投資網誌" in markdown:
         errors.append("Low-quality forum news is present")
+
+    try:
+        forecast_section = section(
+            markdown,
+            "## 次一交易日大盤方向推估",
+            "## 國際情勢與台股影響",
+        )
+        probability_match = re.search(
+            r"上漲\s+(\d+(?:\.\d+)?)%.*?"
+            r"平盤\s+(\d+(?:\.\d+)?)%.*?"
+            r"下跌\s+(\d+(?:\.\d+)?)%",
+            forecast_section,
+            flags=re.DOTALL,
+        )
+        if not probability_match:
+            errors.append("Next-session forecast probabilities are missing")
+        else:
+            probabilities = [float(value) for value in probability_match.groups()]
+            if any(value < 0 or value > 100 for value in probabilities):
+                errors.append("Next-session forecast probability is outside 0-100%")
+            if abs(sum(probabilities) - 100.0) > 0.11:
+                errors.append(
+                    "Next-session forecast probabilities do not total 100%"
+                )
+            if max(probabilities) > 60.1:
+                errors.append(
+                    "Next-session forecast exceeds the 60% confidence cap"
+                )
+        if "±0.3%" not in forecast_section:
+            errors.append("Next-session flat-market threshold is undefined")
+        if "規則型情境推估" not in forecast_section:
+            errors.append("Next-session forecast methodology warning is missing")
+        if "單一方向機率上限為 60%" not in forecast_section:
+            errors.append("Next-session forecast probability cap is undocumented")
+        if re.search(r"必漲|必跌|保證上漲|保證下跌", forecast_section):
+            errors.append("Next-session forecast contains guaranteed language")
+    except AssertionError as exc:
+        errors.append(str(exc))
 
     try:
         etf_section = section(
@@ -107,11 +151,16 @@ def validate(mode: str) -> list[str]:
     except AssertionError as exc:
         errors.append(str(exc))
 
-    report_date = parse_report_date(markdown_path)
+    report_date = parse_report_date(markdown_path, markdown)
     if report_date:
         try:
             dated_sections = section(
                 markdown, "## 2.5 台股大盤與資金健康度", "## 建議投資股票及原因"
+            )
+            dated_sections += section(
+                markdown,
+                "## 次一交易日大盤方向推估",
+                "## 國際情勢與台股影響",
             )
             for found in re.findall(r"20\d{2}-\d{2}-\d{2}", dated_sections):
                 if date.fromisoformat(found) > report_date:

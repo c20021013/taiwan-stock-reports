@@ -91,6 +91,7 @@ class Security:
     large_holder_date: str = ""
     reasons: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
+    data_date: str = ""
 
 
 @dataclass
@@ -109,6 +110,7 @@ class InternationalIndicator:
 
 @dataclass
 class MarketHealth:
+    data_date: str = ""
     electronic_ratio: float | None = None
     financial_ratio: float | None = None
     traditional_ratio: float | None = None
@@ -137,6 +139,27 @@ class ChipContext:
     short_sale_delta: int | None = None
     maintenance_ratio: float | None = None
     maintenance_note: str = "資料暫缺：大盤融資維持率目前需付費或另接穩定來源"
+
+
+@dataclass
+class ForecastFactor:
+    name: str
+    contribution: float
+    evidence: str
+    data_date: str = ""
+
+
+@dataclass
+class NextSessionForecast:
+    up_probability: float
+    flat_probability: float
+    down_probability: float
+    label: str
+    confidence: str
+    score: float
+    coverage: float
+    factors: list[ForecastFactor] = field(default_factory=list)
+    invalidation: str = ""
 
 
 def load_config() -> dict[str, Any]:
@@ -554,7 +577,9 @@ def market_health(
     )
 
     ratio = lambda value: (value / total_value * 100) if total_value else None
+    market_dates = [item.data_date for item in securities.values() if item.data_date]
     return MarketHealth(
+        data_date=max(market_dates, default=""),
         electronic_ratio=ratio(sector_values["electronic"]),
         financial_ratio=ratio(sector_values["financial"]),
         traditional_ratio=ratio(sector_values["traditional"]),
@@ -610,6 +635,9 @@ def parse_row_date(row: dict[str, Any]) -> date | None:
     if not value:
         return None
     text = str(value).strip()[:10]
+    if re.fullmatch(r"\d{7}", text):
+        roc_year = int(text[:3])
+        text = f"{roc_year + 1911:04d}-{text[3:5]}-{text[5:]}"
     if re.fullmatch(r"\d{8}", text):
         text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
     try:
@@ -1081,6 +1109,11 @@ def load_market_data(config: dict[str, Any]) -> dict[str, Security]:
             volume=number(row.get("TradeVolume")) or 0.0,
             value=number(row.get("TradeValue")) or 0.0,
             is_etf=symbol in etf_symbols,
+            data_date=(
+                parsed_date.isoformat()
+                if (parsed_date := parse_row_date(row))
+                else ""
+            ),
         )
 
     for row in tpex_daily:
@@ -1097,6 +1130,11 @@ def load_market_data(config: dict[str, Any]) -> dict[str, Security]:
             volume=number(row.get("TradingShares")) or 0.0,
             value=number(row.get("TransactionAmount")) or 0.0,
             is_etf=symbol in etf_symbols,
+            data_date=(
+                parsed_date.isoformat()
+                if (parsed_date := parse_row_date(row))
+                else ""
+            ),
         )
 
     for row in twse_values:
@@ -1255,6 +1293,261 @@ def international_bias(indicators: list[InternationalIndicator]) -> tuple[str, f
     if score <= -2.0:
         return "偏空", score
     return "中性", score
+
+
+def rounded_probabilities(
+    up: float,
+    flat: float,
+    down: float,
+) -> tuple[float, float, float]:
+    values = {
+        "up": round(up * 100, 1),
+        "flat": round(flat * 100, 1),
+        "down": round(down * 100, 1),
+    }
+    difference = round(100.0 - sum(values.values()), 1)
+    largest = max(values, key=values.get)
+    values[largest] = round(values[largest] + difference, 1)
+    return values["up"], values["flat"], values["down"]
+
+
+def cap_probability_distribution(
+    probabilities: list[float],
+    maximum: float = 0.60,
+) -> list[float]:
+    capped = list(probabilities)
+    largest_index = max(range(len(capped)), key=capped.__getitem__)
+    if capped[largest_index] <= maximum:
+        return capped
+    excess = capped[largest_index] - maximum
+    capped[largest_index] = maximum
+    other_indices = [index for index in range(len(capped)) if index != largest_index]
+    other_total = sum(capped[index] for index in other_indices)
+    if other_total <= 0:
+        for index in other_indices:
+            capped[index] += excess / len(other_indices)
+    else:
+        for index in other_indices:
+            capped[index] += excess * capped[index] / other_total
+    return capped
+
+
+def neutral_next_session_forecast() -> NextSessionForecast:
+    return NextSessionForecast(
+        up_probability=31.7,
+        flat_probability=36.6,
+        down_probability=31.7,
+        label="平盤",
+        confidence="低",
+        score=0.0,
+        coverage=0.0,
+        factors=[
+            ForecastFactor(
+                "資料完整度",
+                0.0,
+                "可用市場因子不足，機率已主動拉回接近均等分布",
+            )
+        ],
+        invalidation="任何開盤前重大政策、地緣政治或權值股事件都可能改變方向。",
+    )
+
+
+def estimate_next_session(
+    indicators: list[InternationalIndicator],
+    health: MarketHealth,
+    chips: ChipContext,
+    as_of: date | None = None,
+) -> NextSessionForecast:
+    factors: list[ForecastFactor] = []
+    data = indicator_map(indicators)
+
+    if indicators:
+        bias, raw_score = international_bias(indicators)
+        contribution = clamp(raw_score / 4.0, -1.5, 1.5)
+        latest_date = max(
+            (item.latest_date for item in indicators if item.latest_date),
+            default="",
+        )
+        factors.append(
+            ForecastFactor(
+                "國際風險偏好",
+                contribution,
+                f"美股、半導體、利率與波動率綜合為{bias}，原始分數 {raw_score:.1f}",
+                latest_date,
+            )
+        )
+
+    breadth_directional = health.up_count + health.down_count
+    if breadth_directional:
+        breadth_ratio = (
+            health.up_count - health.down_count
+        ) / breadth_directional
+        contribution = clamp(breadth_ratio * 1.5, -1.2, 1.2)
+        factors.append(
+            ForecastFactor(
+                "台股市場廣度",
+                contribution,
+                f"上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家",
+                health.data_date,
+            )
+        )
+
+    foreign_cash = chips.institutional_nets.get("Foreign_Investor")
+    if foreign_cash is not None:
+        contribution = clamp(foreign_cash / 30_000_000_000, -1.0, 1.0)
+        action = "買超" if foreign_cash > 0 else "賣超" if foreign_cash < 0 else "持平"
+        factors.append(
+            ForecastFactor(
+                "外資現貨",
+                contribution,
+                f"外資{action} {fmt_money_yi(abs(foreign_cash))}",
+                chips.institutional_date,
+            )
+        )
+
+    futures_net = chips.foreign_tx_net_open_interest
+    futures_delta = chips.foreign_tx_net_delta
+    if futures_net is not None or futures_delta is not None:
+        position_score = (
+            clamp((futures_net or 0) / 20_000, -1.0, 1.0) * 0.5
+        )
+        change_score = (
+            clamp((futures_delta or 0) / 5_000, -1.0, 1.0) * 0.7
+        )
+        contribution = clamp(position_score + change_score, -1.2, 1.2)
+        factors.append(
+            ForecastFactor(
+                "外資台指期",
+                contribution,
+                f"淨未平倉 {fmt_signed_int(futures_net, ' 口')}，"
+                f"較前期 {fmt_signed_int(futures_delta, ' 口')}",
+                chips.futures_date,
+            )
+        )
+
+    usdtwd = data.get("usdtwd")
+    if usdtwd and usdtwd.change_1d is not None:
+        contribution = clamp(-usdtwd.change_1d / 0.75, -0.6, 0.6)
+        factors.append(
+            ForecastFactor(
+                "美元／台幣",
+                contribution,
+                f"1 日變化 {fmt_change(usdtwd.change_1d)}；"
+                "台幣升值通常較有利外資風險承擔，貶值則相反",
+                usdtwd.latest_date,
+            )
+        )
+
+    if not factors:
+        return neutral_next_session_forecast()
+
+    score = clamp(sum(item.contribution for item in factors), -4.0, 4.0)
+    vix = data.get("vix")
+    flat_logit = 0.9 - abs(score) * 0.25
+    if vix:
+        if vix.latest >= 25:
+            flat_logit -= 0.25
+        elif vix.latest <= 18:
+            flat_logit += 0.15
+
+    temperature = 2.2
+    logits = [score / temperature, flat_logit / temperature, -score / temperature]
+    maximum = max(logits)
+    weights = [math.exp(value - maximum) for value in logits]
+    total = sum(weights)
+    raw = [value / total for value in weights]
+
+    coverage = min(1.0, len(factors) / 5.0)
+    evidence_weight = 0.35 + coverage * 0.45
+    blended = [
+        value * evidence_weight + (1 / 3) * (1 - evidence_weight)
+        for value in raw
+    ]
+    blended = cap_probability_distribution(blended)
+    up_probability, flat_probability, down_probability = rounded_probabilities(
+        blended[0],
+        blended[1],
+        blended[2],
+    )
+    probabilities = {
+        "上漲": up_probability,
+        "平盤": flat_probability,
+        "下跌": down_probability,
+    }
+    label = max(probabilities, key=probabilities.get)
+    ranked = sorted(probabilities.values(), reverse=True)
+    edge = ranked[0] - ranked[1]
+    confidence = (
+        "中等"
+        if coverage >= 0.8 and edge >= 10
+        else "偏低"
+        if coverage >= 0.6 and edge >= 5
+        else "低"
+    )
+
+    if label == "上漲":
+        invalidation = (
+            "若開盤前美股期貨明顯轉弱、台幣快速貶值，或外資期現貨轉為擴大賣超，"
+            "偏多情境失效。"
+        )
+    elif label == "下跌":
+        invalidation = (
+            "若開盤前美股與半導體期貨明顯轉強、台幣升值，或外資期貨空單快速回補，"
+            "偏空情境失效。"
+        )
+    else:
+        invalidation = (
+            "若開盤前美股期貨、匯率或重大權值股事件造成超過一般波動的單向衝擊，"
+            "平盤情境失效。"
+        )
+
+    return NextSessionForecast(
+        up_probability=up_probability,
+        flat_probability=flat_probability,
+        down_probability=down_probability,
+        label=label,
+        confidence=confidence,
+        score=round(score, 2),
+        coverage=coverage,
+        factors=sorted(factors, key=lambda item: abs(item.contribution), reverse=True),
+        invalidation=invalidation,
+    )
+
+
+def next_session_forecast_section(
+    forecast: NextSessionForecast,
+) -> list[str]:
+    marker = {"上漲": "🔴", "平盤": "⚪", "下跌": "🟢"}[forecast.label]
+    factor_lines = [
+        f"- {direction_marker(item.contribution)} {item.name}：{item.evidence}"
+        f"{f'（資料日 {item.data_date}）' if item.data_date else ''}；"
+        f"模型貢獻 {item.contribution:+.2f}。"
+        for item in forecast.factors[:5]
+    ]
+    return [
+        "## 次一交易日大盤方向推估",
+        "",
+        "> 預測對象為臺灣加權股價指數次一交易日收盤相對前一交易日收盤；"
+        "上漲與下跌門檻為 ±0.3%，介於其間定義為平盤。",
+        "",
+        f"- 目前猜測：{marker} **{forecast.label}**；可信度："
+        f"**{forecast.confidence}**；有效因子覆蓋率 {forecast.coverage * 100:.0f}%。",
+        f"- 機率分布：🔴 上漲 {forecast.up_probability:.1f}%｜"
+        f"⚪ 平盤 {forecast.flat_probability:.1f}%｜"
+        f"🟢 下跌 {forecast.down_probability:.1f}%（合計 100.0%）。",
+        f"- 綜合情境分數：{forecast.score:+.2f}。正值偏多、負值偏空；"
+        "分數只用於機率換算，不代表預期漲跌幅。",
+        "",
+        "### 主要推估依據",
+        "",
+        *factor_lines,
+        "",
+        f"- 反證條件：{forecast.invalidation}",
+        "- 這是規則型情境推估，不是報酬保證；突發政策、戰事、天災或公司重大訊息"
+        "可能使隔日走勢完全不同。單一方向機率上限為 60%，並應以每日累積命中紀錄"
+        "校準，不因單次猜對就提高信任。",
+        "",
+    ]
 
 
 def fmt_change(value: float | None) -> str:
@@ -1420,6 +1713,7 @@ def market_health_section(health: MarketHealth) -> list[str]:
     lines = [
         "## 2.5 台股大盤與資金健康度",
         "",
+        f"- 市場行情資料日：{health.data_date or '—'}。",
         f"- 類股成交比重：電子股 {pct_text(health.electronic_ratio)}、"
         f"金融股 {pct_text(health.financial_ratio)}、"
         f"傳產股 {pct_text(health.traditional_ratio)}。"
@@ -1473,6 +1767,7 @@ def executive_summary_section(
     indicators: list[InternationalIndicator],
     health: MarketHealth,
     chips: ChipContext,
+    forecast: NextSessionForecast | None = None,
 ) -> list[str]:
     breadth_total = health.up_count + health.down_count + health.flat_count
     if breadth_total:
@@ -1542,12 +1837,24 @@ def executive_summary_section(
     else:
         risk_line = "⚪ VIX 資料暫缺，風險提示改以美股、利率與匯率綜合判讀。"
 
+    current_forecast = forecast or neutral_next_session_forecast()
+    forecast_marker = {
+        "上漲": "🔴",
+        "平盤": "⚪",
+        "下跌": "🟢",
+    }[current_forecast.label]
+
     return [
         "## 今日盤後速覽 (TL;DR)",
         "",
         f"- 大盤結構：{breadth}{sector}；{sector_note}。",
         f"- 籌碼動向：{chip_line}",
         f"- 風險提示：{risk_line}",
+        f"- 次一交易日：{forecast_marker} 猜測{current_forecast.label}，"
+        f"上漲／平盤／下跌機率為 {current_forecast.up_probability:.1f}%／"
+        f"{current_forecast.flat_probability:.1f}%／"
+        f"{current_forecast.down_probability:.1f}%，可信度"
+        f"{current_forecast.confidence}。",
         "",
     ]
 
@@ -1934,6 +2241,7 @@ def build_markdown(
     international: list[InternationalIndicator] | None = None,
     health: MarketHealth | None = None,
     chips: ChipContext | None = None,
+    forecast: NextSessionForecast | None = None,
 ) -> str:
     stocks = sorted(
         [item for item in candidates if not item.is_etf and item.score > 0],
@@ -1950,6 +2258,7 @@ def build_markdown(
     growth_stocks = [item for item in stocks if not is_financial_stock(item)][:8]
     financial_stocks = [item for item in stocks if is_financial_stock(item)][:8]
     title = report_title(mode, generated_at.date())
+    current_forecast = forecast or neutral_next_session_forecast()
 
     intro = [
         f"# {title}",
@@ -1985,8 +2294,12 @@ def build_markdown(
     lines = (
         intro
         + executive_summary_section(
-            international or [], health or MarketHealth(), chips or ChipContext()
+            international or [],
+            health or MarketHealth(),
+            chips or ChipContext(),
+            current_forecast,
         )
+        + next_session_forecast_section(current_forecast)
         + international_section(international or [])
         + market_health_section(health or MarketHealth())
         + chip_section(chips or ChipContext())
@@ -2107,6 +2420,31 @@ def dashboard_breadth_chart(health: MarketHealth) -> str:
     return f'<div class="breadth-track">{segments}</div><ul class="breadth-legend">{labels}</ul>'
 
 
+def dashboard_forecast_chart(forecast: NextSessionForecast) -> str:
+    rows = [
+        ("上漲", forecast.up_probability, "up"),
+        ("平盤", forecast.flat_probability, "flat"),
+        ("下跌", forecast.down_probability, "down"),
+    ]
+    bars = []
+    for label, value, tone in rows:
+        bars.append(
+            '<div class="forecast-row">'
+            f'<span class="forecast-label">{label}</span>'
+            '<span class="forecast-track">'
+            f'<span class="forecast-fill {tone}" style="width:{value:.1f}%"></span>'
+            "</span>"
+            f'<strong>{value:.1f}%</strong>'
+            "</div>"
+        )
+    return (
+        "".join(bars)
+        + f'<p class="chart-note">目前猜測：{html.escape(forecast.label)}｜'
+        f'可信度：{html.escape(forecast.confidence)}｜'
+        f'因子覆蓋率：{forecast.coverage * 100:.0f}%</p>'
+    )
+
+
 def dashboard_financial_rows(stocks: list[Security]) -> str:
     if not stocks:
         return '<tr><td colspan="7">候選標的資料暫缺。</td></tr>'
@@ -2143,8 +2481,10 @@ def finance_report_dashboard(
     generated_at: datetime,
     health: MarketHealth,
     chips: ChipContext,
+    forecast: NextSessionForecast | None = None,
 ) -> str:
     """Render the finance-report skill as a self-contained report overview."""
+    current_forecast = forecast or neutral_next_session_forecast()
     stocks = sorted(
         [item for item in candidates if not item.is_etf and item.score > 0],
         key=lambda item: item.score,
@@ -2176,6 +2516,9 @@ def finance_report_dashboard(
     )
     top_reason = stocks[0].reasons[0] if stocks and stocks[0].reasons else "等待公司事件與營收資料確認"
     highlights = [
+        f"次一交易日推估：{current_forecast.label}；上漲、平盤、下跌機率為 "
+        f"{current_forecast.up_probability:.1f}%、{current_forecast.flat_probability:.1f}%、"
+        f"{current_forecast.down_probability:.1f}%，可信度{current_forecast.confidence}。",
         f"市場廣度：上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家，報告以全市場漲跌家數判讀盤面結構。",
         f"營收動能：{positive_revenue}/{len(stocks)} 檔非金融候選標的月營收年增；月營收只作基本面線索，不單獨解釋股價。",
         f"資金健康度：{sector_detail}；類股成交比重用於辨識資金是否過度集中。",
@@ -2183,8 +2526,9 @@ def finance_report_dashboard(
         f"最高分候選：{stocks[0].symbol} {stocks[0].name}，首要研究線索為「{top_reason}」。" if stocks else "候選清單資料暫缺。",
     ]
     outlook = (
-        "下期重點驗證月營收年增能否延續、公司重大訊息是否支持需求或獲利改善，"
-        "並持續觀察外資現貨與台指期部位、國際利率與匯率。"
+        f"次一交易日目前以{current_forecast.label}情境機率最高，但仍須驗證"
+        f"{current_forecast.invalidation}"
+        "公司研究部分則持續檢查月營收、獲利與重大訊息是否支持需求改善。"
     )
     mode_label = "週度彙整" if mode == "weekly" else "每日盤後"
     return f"""
@@ -2195,6 +2539,7 @@ def finance_report_dashboard(
     <p>資料時間：{generated_at:%Y-%m-%d %H:%M}（Asia/Taipei）｜以公開資料建立的研究總覽</p>
   </header>
   <section class="kpi-grid" aria-label="核心 KPI">
+    {dashboard_metric("次一交易日推估", current_forecast.label, f"漲 {current_forecast.up_probability:.1f}%｜平 {current_forecast.flat_probability:.1f}%｜跌 {current_forecast.down_probability:.1f}%", "up" if current_forecast.label == "上漲" else "down" if current_forecast.label == "下跌" else "neutral")}
     {dashboard_metric("市場廣度", breadth, "上漲 / 下跌家數", "up" if health.up_count >= health.down_count else "down")}
     {dashboard_metric("電子成交比重", pct_text(health.electronic_ratio), sector_detail, "neutral")}
     {dashboard_metric("法人現貨合計", institutional_value, institutional_detail, "up" if (institutional or 0) > 0 else "down" if (institutional or 0) < 0 else "neutral")}
@@ -2210,6 +2555,10 @@ def finance_report_dashboard(
       {dashboard_breadth_chart(health)}
       <p class="chart-note">以漲跌家數替代企業燒錢指標，避免把不適用的公司財報概念套到台股大盤。</p>
     </article>
+    <article class="dashboard-panel">
+      <div class="panel-heading"><p>Next Session Scenario</p><h2>次一交易日方向機率</h2></div>
+      {dashboard_forecast_chart(current_forecast)}
+    </article>
   </section>
   <section class="dashboard-panel financial-summary">
     <div class="panel-heading"><p>Financial Snapshot</p><h2>候選標的財務與估值摘要</h2></div>
@@ -2220,7 +2569,7 @@ def finance_report_dashboard(
     <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
     <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
   </section>
-  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次一交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
 </section>
 """
 
@@ -2295,11 +2644,12 @@ th {{ background: #edf3fb; position: sticky; top: 0; z-index: 1; }} tr:nth-child
 .finance-masthead {{ padding:32px; border-radius:20px; color:#fff; background:linear-gradient(135deg,#102a56,#215a93 62%,#2f8b8b); box-shadow:0 12px 30px #102a5630; }}
 .finance-masthead h1 {{ margin:5px 0 8px; color:#fff; font-size:clamp(28px,4vw,44px); line-height:1.2; }} .finance-masthead p {{ margin:0; color:#e8f0fb; }}
 .eyebrow,.panel-heading p,.kpi-label {{ margin:0; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }} .finance-masthead .eyebrow {{ color:#b9d9ff; }}
-.kpi-grid,.dashboard-grid {{ display:grid; gap:16px; margin-top:16px; }} .kpi-grid {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} .dashboard-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+.kpi-grid,.dashboard-grid {{ display:grid; gap:16px; margin-top:16px; }} .kpi-grid {{ grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }} .dashboard-grid {{ grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }}
 .kpi-card,.dashboard-panel {{ background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; box-shadow:0 4px 14px #102a5609; }}
 .kpi-card {{ border-top:4px solid #8ca0b8; }} .kpi-up {{ border-top-color:var(--red); }} .kpi-down {{ border-top-color:var(--green); }} .kpi-value {{ margin:7px 0 3px; color:var(--navy); font-size:25px; font-weight:800; }} .kpi-detail,.chart-note {{ margin:0; color:var(--muted); font-size:13px; }}
 .panel-heading h2 {{ margin:2px 0 18px; font-size:20px; }} .bar-row {{ display:grid; grid-template-columns:minmax(95px,1fr) 2fr 62px; gap:9px; align-items:center; margin:12px 0; font-size:13px; }} .bar-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .bar-track {{ height:10px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .bar-fill {{ display:block; height:100%; border-radius:inherit; }} .bar-fill.up {{ background:var(--red); }} .bar-fill.down {{ background:var(--green); }} .bar-value {{ text-align:right; }} .bar-value.up {{ color:var(--red); }} .bar-value.down {{ color:var(--green); }}
 .breadth-track {{ display:flex; height:24px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .breadth-up {{ background:var(--red); }} .breadth-flat {{ background:#9daabd; }} .breadth-down {{ background:var(--green); }} .breadth-legend {{ display:flex; flex-wrap:wrap; gap:12px; padding:0; margin:16px 0 0; list-style:none; font-size:13px; }} .legend-dot {{ display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; }}
+.forecast-row {{ display:grid; grid-template-columns:42px 1fr 54px; gap:10px; align-items:center; margin:13px 0; font-size:13px; }} .forecast-track {{ height:13px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .forecast-fill {{ display:block; height:100%; border-radius:inherit; }} .forecast-fill.up {{ background:var(--red); }} .forecast-fill.flat {{ background:#9daabd; }} .forecast-fill.down {{ background:var(--green); }} .forecast-row strong {{ text-align:right; }}
 .financial-summary {{ margin-top:16px; }} .table-scroll {{ overflow-x:auto; }} .financial-summary table {{ margin:0; }} .highlight-list {{ margin:0; padding-left:20px; }} .highlight-list li {{ margin:10px 0; }} .outlook-copy {{ margin:0; font-size:16px; }} .methodology {{ margin-top:16px; padding:16px 20px; border:1px solid var(--line); border-radius:14px; background:#edf3fb; }} .methodology summary {{ color:var(--navy); cursor:pointer; font-weight:800; }} .methodology p {{ margin:12px 0 0; color:#43516a; }} .chart-empty {{ margin:0; color:var(--muted); }}
 @media (max-width:800px) {{ body {{ margin:0 auto; padding:12px 12px 38px; }} .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr 1fr; }} .finance-masthead {{ padding:24px; }} }}
 @media (max-width:520px) {{ .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr; }} .bar-row {{ grid-template-columns:90px 1fr 54px; gap:6px; }} table {{ font-size:12px; }} th,td {{ padding:6px; }} }}
@@ -2340,12 +2690,21 @@ def run(mode: str) -> tuple[Path, Path]:
     health = market_health(securities, candidates)
     health.retail_mtx_sentiment = load_non_institution_mtx_sentiment(report_date)
     chips = load_chip_context(candidates, report_date)
-    markdown = build_markdown(mode, candidates, generated_at, international, health, chips)
+    forecast = estimate_next_session(international, health, chips, report_date)
+    markdown = build_markdown(
+        mode,
+        candidates,
+        generated_at,
+        international,
+        health,
+        chips,
+        forecast,
+    )
     title = report_title(mode, report_date)
     md_path, html_path = output_paths(mode, report_date)
     md_path.write_text(markdown, encoding="utf-8")
     dashboard = finance_report_dashboard(
-        title, mode, candidates, generated_at, health, chips
+        title, mode, candidates, generated_at, health, chips, forecast
     )
     html_path.write_text(markdown_to_html(markdown, title, dashboard), encoding="utf-8")
     (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")
