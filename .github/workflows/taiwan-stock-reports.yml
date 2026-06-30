@@ -12,10 +12,10 @@ on:
           - daily
           - weekly
   schedule:
-    # Start before peak cron traffic, then wait until Asia/Taipei 08:00.
-    - cron: "50 23 * * 0-4"
-    # Start before peak cron traffic, then wait until Asia/Taipei Sunday 21:00.
-    - cron: "50 12 * * 0"
+    # Start early in the cloud, then wait until Asia/Taipei 08:00.
+    - cron: "0 22 * * 0-4"
+    # Start early in the cloud, then wait until Asia/Taipei Sunday 21:00.
+    - cron: "0 11 * * 0"
 
 permissions:
   contents: write
@@ -23,7 +23,7 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 180
 
     env:
       PYTHONIOENCODING: utf-8
@@ -63,7 +63,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event.schedule }}" == "50 12 * * 0" ]]; then
+          elif [[ "${{ github.event.schedule }}" == "0 11 * * 0" ]]; then
             echo "mode=weekly" >> "$GITHUB_OUTPUT"
           else
             echo "mode=daily" >> "$GITHUB_OUTPUT"
@@ -77,15 +77,20 @@ jobs:
           python - <<'PY'
           import os
           import time
-          from datetime import datetime, timedelta, timezone
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
 
-          now = datetime.now(timezone.utc)
-          if os.environ["SCHEDULE"] == "50 12 * * 0":
-              target = now.replace(hour=13, minute=0, second=0, microsecond=0)
+          taipei = ZoneInfo("Asia/Taipei")
+          now_utc = datetime.now(timezone.utc)
+          now_taipei = now_utc.astimezone(taipei)
+          if os.environ["SCHEDULE"] == "0 11 * * 0":
+              target_taipei = now_taipei.replace(hour=21, minute=0, second=0, microsecond=0)
           else:
-              target_day = now + timedelta(days=1) if now.hour == 23 else now
-              target = target_day.replace(hour=0, minute=0, second=0, microsecond=0)
-          delay = max(0, int((target - now).total_seconds()))
+              target_taipei = now_taipei.replace(hour=8, minute=0, second=0, microsecond=0)
+          target_utc = target_taipei.astimezone(timezone.utc)
+          delay = max(0, int((target_utc - now_utc).total_seconds()))
+          print(f"Current Asia/Taipei time: {now_taipei:%Y-%m-%d %H:%M:%S}")
+          print(f"Target Asia/Taipei time: {target_taipei:%Y-%m-%d %H:%M:%S}")
           print(f"Waiting {delay} seconds for the report time")
           time.sleep(delay)
           PY

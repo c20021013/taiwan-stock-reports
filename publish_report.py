@@ -20,6 +20,11 @@ REPORTS_DIR = ROOT / "reports"
 GITHUB_API = "https://api.github.com"
 DEFAULT_REPOSITORY = "c20021013/taiwan-stock-reports"
 USER_AGENT = "TaiwanStockResearch/1.0"
+REQUIRED_CURRENT_REPORT_MARKERS = (
+    "finance-dashboard",
+    "次一交易日方向機率",
+    "次一交易日大盤方向推估",
+)
 
 
 def request_json(
@@ -82,9 +87,7 @@ def put_text_file(
 
 def latest_report(mode: str) -> Path:
     folder = REPORTS_DIR / mode
-    files = sorted(
-        folder.glob("*.html"), key=lambda path: path.stat().st_mtime, reverse=True
-    )
+    files = sorted(folder.glob("*.html"), key=lambda path: path.name, reverse=True)
     if not files:
         raise FileNotFoundError(f"找不到 {folder} 內的 HTML 報告")
     return files[0]
@@ -94,9 +97,22 @@ def report_repository_path(html_path: Path) -> str:
     return html_path.relative_to(ROOT).as_posix()
 
 
+def validate_current_report_html(content: str, repository_path: str) -> None:
+    """Block stale/simple reports from replacing the public latest report."""
+    missing = [
+        marker for marker in REQUIRED_CURRENT_REPORT_MARKERS if marker not in content
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Refusing to publish {repository_path}: missing required HTML markers "
+            f"{', '.join(missing)}"
+        )
+
+
 def publish_file(html_path: Path, repository: str, token: str) -> str:
     repository_path = report_repository_path(html_path)
     content = html_path.read_text(encoding="utf-8")
+    validate_current_report_html(content, repository_path)
     put_text_file(
         repository,
         repository_path,

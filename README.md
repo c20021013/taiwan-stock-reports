@@ -155,7 +155,10 @@ Variables：
 4. `mode` 選 `daily`。
 5. 執行成功後，確認 GitHub Pages 與 Discord 是否出現新報告。
 
-GitHub Actions 排程可能因 GitHub 負載延遲幾分鐘，但不需要 Codex 或本機電腦開著。
+GitHub Actions 是雲端執行，不需要 Codex 或本機電腦開著。排程目前會提前啟動：
+每日報告約在 06:00（Asia/Taipei）先啟動並等待到 08:00 產生；週日彙整約在
+19:00 先啟動並等待到 21:00 產生。GitHub 排程仍可能因平台負載延遲，若需要
+精準到分鐘，建議改接專用雲端排程服務。
 
 ## FinMind Token
 
