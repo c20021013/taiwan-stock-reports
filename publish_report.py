@@ -22,8 +22,8 @@ DEFAULT_REPOSITORY = "c20021013/taiwan-stock-reports"
 USER_AGENT = "TaiwanStockResearch/1.0"
 REQUIRED_CURRENT_REPORT_MARKERS = (
     "finance-dashboard",
-    "次一交易日方向機率",
-    "次一交易日大盤方向推估",
+    "次交易日推估",
+    "方向機率",
 )
 
 

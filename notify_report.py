@@ -80,13 +80,15 @@ def parse_list_items(markdown: str, heading: str, limit: int) -> list[str]:
 def build_summary(markdown: str, mode: str) -> str:
     title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
     title = title_match.group(1) if title_match else "台股研究報告"
-    tldr = parse_list_items(markdown, "## 今日盤後速覽 (TL;DR)", 3)
+    tldr = parse_list_items(markdown, "## 盤前速覽（以前一交易日資料為主）(TL;DR)", 3)
+    if not tldr:
+        tldr = parse_list_items(markdown, "## 今日盤後速覽 (TL;DR)", 3)
     international = parse_list_items(markdown, "## 國際情勢與台股影響", 3)
     stocks = parse_table(markdown, "## 建議投資股票及原因", 3)
     etfs = parse_table(markdown, "## 建議投資 ETF 及原因", 2)
     lines = [title, ""]
     if tldr:
-        lines.append("今日盤後速覽 (TL;DR)")
+        lines.append("盤前速覽（以前一交易日資料為主）")
         for item in tldr:
             lines.append(f"- {item}")
         lines.append("")

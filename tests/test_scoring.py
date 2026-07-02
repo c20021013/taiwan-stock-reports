@@ -336,8 +336,10 @@ class ScoringTests(unittest.TestCase):
         section = "\n".join(stock_report.next_session_forecast_section(forecast))
 
         self.assertGreater(forecast.up_probability, baseline.up_probability)
-        self.assertIn("台指期夜盤", [factor.name for factor in forecast.factors])
-        self.assertIn("台指期夜盤", section)
+        self.assertIn("盤前風險情緒", [factor.name for factor in forecast.factors])
+        self.assertNotIn("台指期夜盤", [factor.name for factor in forecast.factors])
+        self.assertNotIn("台指期夜盤", section)
+        self.assertIn("台指期盤後", section)
         self.assertIn("盤後 202607", section)
 
     def test_market_health_section_includes_requested_fields(self):
@@ -451,8 +453,8 @@ class ScoringTests(unittest.TestCase):
             stock_report.executive_summary_section(indicators, health, chips)
         )
 
-        self.assertIn("今日盤後速覽 (TL;DR)", section)
-        self.assertIn("🟢 今日跌多漲少", section)
+        self.assertIn("盤前速覽（以前一交易日資料為主）(TL;DR)", section)
+        self.assertIn("🟢 前一交易日跌多漲少", section)
         self.assertIn("電子股 71.3%", section)
         self.assertIn("🟢 外資現貨賣超 50.0 億", section)
         self.assertIn("⚠️ VIX 28.00", section)
@@ -717,7 +719,8 @@ class ScoringTests(unittest.TestCase):
 
         self.assertIn("候選標的月營收年增率", dashboard)
         self.assertIn("市場廣度與壓力", dashboard)
-        self.assertIn("次一交易日方向機率", dashboard)
+        self.assertIn("次交易日推估", dashboard)
+        self.assertIn("方向機率", dashboard)
         self.assertIn("方法論與資料限制", dashboard)
         self.assertNotIn("chart.js", rendered.lower())
         self.assertEqual(rendered.count("<h1>台股每日研究報告</h1>"), 1)

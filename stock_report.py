@@ -717,6 +717,28 @@ def load_tx_night_session(as_of: date | None = None) -> FuturesNightSessionConte
     return candidates[0][2]
 
 
+def night_session_signal(
+    night_session: FuturesNightSessionContext | None,
+) -> tuple[float, str, str] | None:
+    if not night_session or (
+        night_session.change_pct is None and night_session.change is None
+    ):
+        return None
+    pct_move = night_session.change_pct
+    if pct_move is None and night_session.last and night_session.change is not None:
+        previous = night_session.last - night_session.change
+        pct_move = pct_change(night_session.last, previous) if previous else 0.0
+    contribution = clamp((pct_move or 0.0) / 1.0, -1.0, 1.0)
+    move_word = "上漲" if (pct_move or 0) > 0 else "下跌" if (pct_move or 0) < 0 else "平盤"
+    evidence = (
+        f"台指期盤後 {night_session.contract_month} 收 "
+        f"{fmt(night_session.last, ' 點', 0)}，{move_word} "
+        f"{fmt_signed_int(int(night_session.change or 0), ' 點')} / "
+        f"{fmt_change(pct_move)}，量 {night_session.volume:,} 口"
+    )
+    return contribution, evidence, night_session.data_date
+
+
 def quarter_label(value: str) -> str:
     parsed = parse_row_date({"date": value})
     if not parsed:
@@ -1432,6 +1454,7 @@ def estimate_next_session(
 ) -> NextSessionForecast:
     factors: list[ForecastFactor] = []
     data = indicator_map(indicators)
+    night_signal = night_session_signal(night_session)
 
     if indicators:
         bias, raw_score = international_bias(indicators)
@@ -1440,12 +1463,33 @@ def estimate_next_session(
             (item.latest_date for item in indicators if item.latest_date),
             default="",
         )
+        night_extra = ""
+        if night_signal:
+            night_contribution, night_evidence, night_date = night_signal
+            contribution = clamp(
+                contribution + night_contribution * 0.7, -1.8, 1.8
+            )
+            night_extra = f"；盤前風向：{night_evidence}"
+            latest_date = "；".join(
+                item for item in [latest_date, night_date] if item
+            )
         factors.append(
             ForecastFactor(
-                "國際風險偏好",
+                "國際與盤前風險情緒" if night_signal else "國際風險偏好",
                 contribution,
-                f"美股、半導體、利率與波動率綜合為{bias}，原始分數 {raw_score:.1f}",
+                f"美股、半導體、利率與波動率綜合為{bias}，"
+                f"原始分數 {raw_score:.1f}{night_extra}",
                 latest_date,
+            )
+        )
+    elif night_signal:
+        night_contribution, night_evidence, night_date = night_signal
+        factors.append(
+            ForecastFactor(
+                "盤前風險情緒",
+                clamp(night_contribution * 0.7, -0.9, 0.9),
+                night_evidence,
+                night_date,
             )
         )
 
@@ -1494,27 +1538,6 @@ def estimate_next_session(
                 f"淨未平倉 {fmt_signed_int(futures_net, ' 口')}，"
                 f"較前期 {fmt_signed_int(futures_delta, ' 口')}",
                 chips.futures_date,
-            )
-        )
-
-    if night_session and (
-        night_session.change_pct is not None or night_session.change is not None
-    ):
-        pct_move = night_session.change_pct
-        if pct_move is None and night_session.last and night_session.change is not None:
-            previous = night_session.last - night_session.change
-            pct_move = pct_change(night_session.last, previous) if previous else 0.0
-        contribution = clamp((pct_move or 0.0) / 1.0, -1.0, 1.0)
-        move_word = "上漲" if (pct_move or 0) > 0 else "下跌" if (pct_move or 0) < 0 else "平盤"
-        factors.append(
-            ForecastFactor(
-                "台指期夜盤",
-                contribution,
-                f"{night_session.session} {night_session.contract_month} "
-                f"收 {fmt(night_session.last, ' 點', 0)}，{move_word} "
-                f"{fmt_signed_int(int(night_session.change or 0), ' 點')} / "
-                f"{fmt_change(pct_move)}，量 {night_session.volume:,} 口",
-                night_session.data_date,
             )
         )
 
@@ -1618,14 +1641,14 @@ def next_session_forecast_section(
         for item in forecast.factors[:6]
     ]
     return [
-        "## 次一交易日大盤方向推估",
+        "## 次交易日推估",
         "",
-        "> 預測對象為臺灣加權股價指數次一交易日收盤相對前一交易日收盤；"
+        "> 預測對象為臺灣加權股價指數次交易日收盤相對前一交易日收盤；"
         "上漲與下跌門檻為 ±0.3%，介於其間定義為平盤。",
         "",
         f"- 目前猜測：{marker} **{forecast.label}**；可信度："
         f"**{forecast.confidence}**；有效因子覆蓋率 {forecast.coverage * 100:.0f}%。",
-        f"- 機率分布：🔴 上漲 {forecast.up_probability:.1f}%｜"
+        f"- 方向機率：🔴 上漲 {forecast.up_probability:.1f}%｜"
         f"⚪ 平盤 {forecast.flat_probability:.1f}%｜"
         f"🟢 下跌 {forecast.down_probability:.1f}%（合計 100.0%）。",
         f"- 綜合情境分數：{forecast.score:+.2f}。正值偏多、負值偏空；"
@@ -1637,8 +1660,19 @@ def next_session_forecast_section(
         "",
         f"- 反證條件：{forecast.invalidation}",
         "- 這是規則型情境推估，不是報酬保證；突發政策、戰事、天災或公司重大訊息"
-        "可能使隔日走勢完全不同。單一方向機率上限為 60%，並應以每日累積命中紀錄"
+        "可能使次交易日走勢完全不同。單一方向機率上限為 60%，並應以每日累積命中紀錄"
         "校準，不因單次猜對就提高信任。",
+        "",
+    ]
+
+
+def reader_guide_section() -> list[str]:
+    return [
+        "## 怎麼讀這份報告",
+        "",
+        "- 先看盤前速覽與次交易日推估，掌握大盤風向、方向機率與反證條件。",
+        "- 再看國際情勢、資金健康度與籌碼，確認推估是由哪些外部事件或資金流支撐。",
+        "- 最後看建議標的，重點放在營收、重大訊息、產業催化與估值是否互相支持。",
         "",
     ]
 
@@ -1866,17 +1900,17 @@ def executive_summary_section(
     if breadth_total:
         if health.up_count > health.down_count * 1.2:
             breadth = (
-                f"🔴 今日漲多跌少，上漲 {health.up_count:,} 家、"
+                f"🔴 前一交易日漲多跌少，上漲 {health.up_count:,} 家、"
                 f"下跌 {health.down_count:,} 家。"
             )
         elif health.down_count > health.up_count * 1.2:
             breadth = (
-                f"🟢 今日跌多漲少，上漲 {health.up_count:,} 家、"
+                f"🟢 前一交易日跌多漲少，上漲 {health.up_count:,} 家、"
                 f"下跌 {health.down_count:,} 家。"
             )
         else:
             breadth = (
-                f"⚪ 今日漲跌家數接近，上漲 {health.up_count:,} 家、"
+                f"⚪ 前一交易日漲跌家數接近，上漲 {health.up_count:,} 家、"
                 f"下跌 {health.down_count:,} 家。"
             )
     else:
@@ -1938,12 +1972,12 @@ def executive_summary_section(
     }[current_forecast.label]
 
     return [
-        "## 今日盤後速覽 (TL;DR)",
+        "## 盤前速覽（以前一交易日資料為主）(TL;DR)",
         "",
         f"- 大盤結構：{breadth}{sector}；{sector_note}。",
         f"- 籌碼動向：{chip_line}",
         f"- 風險提示：{risk_line}",
-        f"- 次一交易日：{forecast_marker} 猜測{current_forecast.label}，"
+        f"- 次交易日：{forecast_marker} 猜測{current_forecast.label}，"
         f"上漲／平盤／下跌機率為 {current_forecast.up_probability:.1f}%／"
         f"{current_forecast.flat_probability:.1f}%／"
         f"{current_forecast.down_probability:.1f}%，可信度"
@@ -2393,6 +2427,7 @@ def build_markdown(
             current_forecast,
         )
         + next_session_forecast_section(current_forecast)
+        + reader_guide_section()
         + international_section(international or [])
         + market_health_section(health or MarketHealth())
         + chip_section(chips or ChipContext())
@@ -2531,7 +2566,8 @@ def dashboard_forecast_chart(forecast: NextSessionForecast) -> str:
             "</div>"
         )
     return (
-        "".join(bars)
+        '<p class="chart-note forecast-intro">方向機率（非保證）：</p>'
+        + "".join(bars)
         + f'<p class="chart-note">目前猜測：{html.escape(forecast.label)}｜'
         f'可信度：{html.escape(forecast.confidence)}｜'
         f'因子覆蓋率：{forecast.coverage * 100:.0f}%</p>'
@@ -2609,7 +2645,7 @@ def finance_report_dashboard(
     )
     top_reason = stocks[0].reasons[0] if stocks and stocks[0].reasons else "等待公司事件與營收資料確認"
     highlights = [
-        f"次一交易日推估：{current_forecast.label}；上漲、平盤、下跌機率為 "
+        f"次交易日推估：{current_forecast.label}；上漲、平盤、下跌機率為 "
         f"{current_forecast.up_probability:.1f}%、{current_forecast.flat_probability:.1f}%、"
         f"{current_forecast.down_probability:.1f}%，可信度{current_forecast.confidence}。",
         f"市場廣度：上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家，報告以全市場漲跌家數判讀盤面結構。",
@@ -2619,11 +2655,11 @@ def finance_report_dashboard(
         f"最高分候選：{stocks[0].symbol} {stocks[0].name}，首要研究線索為「{top_reason}」。" if stocks else "候選清單資料暫缺。",
     ]
     outlook = (
-        f"次一交易日目前以{current_forecast.label}情境機率最高，但仍須驗證"
+        f"次交易日目前以{current_forecast.label}情境機率最高，但仍須驗證"
         f"{current_forecast.invalidation}"
         "公司研究部分則持續檢查月營收、獲利與重大訊息是否支持需求改善。"
     )
-    mode_label = "週度彙整" if mode == "weekly" else "每日盤後"
+    mode_label = "週度彙整" if mode == "weekly" else "每日盤前"
     return f"""
 <section class="finance-dashboard" aria-label="財務總覽">
   <header class="finance-masthead">
@@ -2632,7 +2668,7 @@ def finance_report_dashboard(
     <p>資料時間：{generated_at:%Y-%m-%d %H:%M}（Asia/Taipei）｜以公開資料建立的研究總覽</p>
   </header>
   <section class="kpi-grid" aria-label="核心 KPI">
-    {dashboard_metric("次一交易日推估", current_forecast.label, f"漲 {current_forecast.up_probability:.1f}%｜平 {current_forecast.flat_probability:.1f}%｜跌 {current_forecast.down_probability:.1f}%", "up" if current_forecast.label == "上漲" else "down" if current_forecast.label == "下跌" else "neutral")}
+    {dashboard_metric("次交易日推估", current_forecast.label, f"漲 {current_forecast.up_probability:.1f}%｜平 {current_forecast.flat_probability:.1f}%｜跌 {current_forecast.down_probability:.1f}%", "up" if current_forecast.label == "上漲" else "down" if current_forecast.label == "下跌" else "neutral")}
     {dashboard_metric("市場廣度", breadth, "上漲 / 下跌家數", "up" if health.up_count >= health.down_count else "down")}
     {dashboard_metric("電子成交比重", pct_text(health.electronic_ratio), sector_detail, "neutral")}
     {dashboard_metric("法人現貨合計", institutional_value, institutional_detail, "up" if (institutional or 0) > 0 else "down" if (institutional or 0) < 0 else "neutral")}
@@ -2649,7 +2685,7 @@ def finance_report_dashboard(
       <p class="chart-note">以漲跌家數替代企業燒錢指標，避免把不適用的公司財報概念套到台股大盤。</p>
     </article>
     <article class="dashboard-panel">
-      <div class="panel-heading"><p>Next Session Scenario</p><h2>次一交易日方向機率</h2></div>
+      <div class="panel-heading"><p>Next Trading Day</p><h2>次交易日推估</h2></div>
       {dashboard_forecast_chart(current_forecast)}
     </article>
   </section>
@@ -2662,7 +2698,7 @@ def finance_report_dashboard(
     <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
     <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
   </section>
-  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次一交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、台指期夜盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、期貨盤後盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
 </section>
 """
 

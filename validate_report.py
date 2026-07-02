@@ -56,8 +56,9 @@ def validate(mode: str) -> list[str]:
     errors: list[str] = []
 
     required_text = [
-        "## 今日盤後速覽 (TL;DR)",
-        "## 次一交易日大盤方向推估",
+        "## 盤前速覽（以前一交易日資料為主）(TL;DR)",
+        "## 次交易日推估",
+        "## 怎麼讀這份報告",
         "## 國際情勢與台股影響",
         "## 2.5 台股大盤與資金健康度",
         "## 2.6 籌碼與信用交易動態",
@@ -89,8 +90,8 @@ def validate(mode: str) -> list[str]:
     try:
         forecast_section = section(
             markdown,
-            "## 次一交易日大盤方向推估",
-            "## 國際情勢與台股影響",
+            "## 次交易日推估",
+            "## 怎麼讀這份報告",
         )
         probability_match = re.search(
             r"上漲\s+(\d+(?:\.\d+)?)%.*?"
@@ -159,8 +160,8 @@ def validate(mode: str) -> list[str]:
             )
             dated_sections += section(
                 markdown,
-                "## 次一交易日大盤方向推估",
-                "## 國際情勢與台股影響",
+                "## 次交易日推估",
+                "## 怎麼讀這份報告",
             )
             for found in re.findall(r"20\d{2}-\d{2}-\d{2}", dated_sections):
                 if date.fromisoformat(found) > report_date:

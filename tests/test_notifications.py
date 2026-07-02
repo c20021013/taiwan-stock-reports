@@ -7,9 +7,9 @@ import notify_report
 
 SAMPLE = """# 台股每日研究報告
 
-## 今日盤後速覽 (TL;DR)
+## 盤前速覽（以前一交易日資料為主）(TL;DR)
 
-- 大盤結構：🟢 今日跌多漲少，電子股 63.5%、金融股 2.6%、傳產股 33.9%。
+- 大盤結構：🟢 前一交易日跌多漲少，電子股 63.5%、金融股 2.6%、傳產股 33.9%。
 - 籌碼動向：🔴 外資現貨買超 20.0 億。
 - 風險提示：⚠️ VIX 上升，短線波動加劇。
 
@@ -51,7 +51,7 @@ class NotificationTests(unittest.TestCase):
         summary = notify_report.build_summary(SAMPLE, "daily")
         self.assertIn("2330 台積電", summary)
         self.assertIn("0050 元大台灣50", summary)
-        self.assertIn("今日盤後速覽", summary)
+        self.assertIn("盤前速覽", summary)
         self.assertIn("VIX 上升", summary)
         self.assertIn("國際情勢與台股影響", summary)
         self.assertIn("SOX 走強", summary)
