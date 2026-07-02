@@ -268,6 +268,78 @@ class ScoringTests(unittest.TestCase):
             places=1,
         )
 
+    def test_tx_night_session_uses_after_hours_tx_contract(self):
+        rows = [
+            {
+                "Date": "20260701",
+                "Contract": "TX",
+                "ContractMonth(Week)": "202607",
+                "Last": "47231",
+                "Change": "452",
+                "%": "0.97%",
+                "Volume": "58097",
+                "TradingSession": "一般",
+            },
+            {
+                "Date": "20260701",
+                "Contract": "TX",
+                "ContractMonth(Week)": "202607",
+                "Last": "47428",
+                "Change": "649",
+                "%": "1.39%",
+                "Volume": "39982",
+                "TradingSession": "盤後",
+            },
+            {
+                "Date": "20260701",
+                "Contract": "TX",
+                "ContractMonth(Week)": "202608",
+                "Last": "47635",
+                "Change": "640",
+                "%": "1.36%",
+                "Volume": "328",
+                "TradingSession": "盤後",
+            },
+        ]
+
+        with mock.patch.object(stock_report, "fetch_optional_json", return_value=rows):
+            night = stock_report.load_tx_night_session(date(2026, 7, 2))
+
+        self.assertIsNotNone(night)
+        self.assertEqual(night.contract, "TX")
+        self.assertEqual(night.contract_month, "202607")
+        self.assertEqual(night.data_date, "2026-07-01 盤後")
+        self.assertAlmostEqual(night.change_pct, 1.39)
+
+    def test_next_session_forecast_uses_night_session_direction(self):
+        night = stock_report.FuturesNightSessionContext(
+            data_date="2026-07-01 盤後",
+            contract_month="202607",
+            last=47428,
+            change=649,
+            change_pct=1.39,
+            volume=39982,
+        )
+        baseline = stock_report.estimate_next_session(
+            [],
+            stock_report.MarketHealth(),
+            stock_report.ChipContext(),
+            date(2026, 7, 2),
+        )
+        forecast = stock_report.estimate_next_session(
+            [],
+            stock_report.MarketHealth(),
+            stock_report.ChipContext(),
+            date(2026, 7, 2),
+            night_session=night,
+        )
+        section = "\n".join(stock_report.next_session_forecast_section(forecast))
+
+        self.assertGreater(forecast.up_probability, baseline.up_probability)
+        self.assertIn("台指期夜盤", [factor.name for factor in forecast.factors])
+        self.assertIn("台指期夜盤", section)
+        self.assertIn("盤後 202607", section)
+
     def test_market_health_section_includes_requested_fields(self):
         health = stock_report.MarketHealth(
             electronic_ratio=55.1,

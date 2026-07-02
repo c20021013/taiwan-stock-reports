@@ -58,6 +58,7 @@ TAIFEX_INSTITUTIONAL_URL = (
     "https://openapi.taifex.com.tw/v1/"
     "MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate"
 )
+TAIFEX_DAILY_FUTURES_URL = "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
 
 
 @dataclass
@@ -139,6 +140,18 @@ class ChipContext:
     short_sale_delta: int | None = None
     maintenance_ratio: float | None = None
     maintenance_note: str = "資料暫缺：大盤融資維持率目前需付費或另接穩定來源"
+
+
+@dataclass
+class FuturesNightSessionContext:
+    data_date: str = ""
+    contract: str = "TX"
+    contract_month: str = ""
+    last: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: int = 0
+    session: str = "盤後"
 
 
 @dataclass
@@ -644,6 +657,64 @@ def parse_row_date(row: dict[str, Any]) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def normalize_taifex_text(value: Any) -> str:
+    text = str(value or "").strip()
+    try:
+        decoded = text.encode("latin1").decode("utf-8").strip()
+        return decoded or text
+    except UnicodeError:
+        return text
+
+
+def percent_number(value: Any) -> float | None:
+    return number(str(value or "").replace("%", ""))
+
+
+def is_after_hours_session(value: Any) -> bool:
+    session = normalize_taifex_text(value)
+    return "盤後" in session or "after" in session.lower()
+
+
+def load_tx_night_session(as_of: date | None = None) -> FuturesNightSessionContext | None:
+    report_date = as_of or datetime.now(TAIPEI_TZ).date()
+    rows = fetch_optional_json(
+        TAIFEX_DAILY_FUTURES_URL,
+        "taifex_daily_futures_latest.json",
+        20,
+    )
+    if not isinstance(rows, list):
+        return None
+    candidates: list[tuple[int, str, FuturesNightSessionContext]] = []
+    for row in latest_group_rows(rows, report_date):
+        if normalize_taifex_text(row.get("Contract")) != "TX":
+            continue
+        if not is_after_hours_session(row.get("TradingSession")):
+            continue
+        last = number(row.get("Last"))
+        change = number(row.get("Change"))
+        change_pct = percent_number(row.get("%"))
+        volume_value = int(number(row.get("Volume")) or 0)
+        if last is None or (change is None and change_pct is None) or volume_value <= 0:
+            continue
+        row_date = parse_row_date(row)
+        session = normalize_taifex_text(row.get("TradingSession")) or "盤後"
+        context = FuturesNightSessionContext(
+            data_date=f"{row_date.isoformat()} {session}" if row_date else session,
+            contract="TX",
+            contract_month=str(row.get("ContractMonth(Week)", "")).strip(),
+            last=last,
+            change=change,
+            change_pct=change_pct,
+            volume=volume_value,
+            session=session,
+        )
+        candidates.append((volume_value, context.contract_month, context))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
 
 
 def quarter_label(value: str) -> str:
@@ -1357,6 +1428,7 @@ def estimate_next_session(
     health: MarketHealth,
     chips: ChipContext,
     as_of: date | None = None,
+    night_session: FuturesNightSessionContext | None = None,
 ) -> NextSessionForecast:
     factors: list[ForecastFactor] = []
     data = indicator_map(indicators)
@@ -1422,6 +1494,27 @@ def estimate_next_session(
                 f"淨未平倉 {fmt_signed_int(futures_net, ' 口')}，"
                 f"較前期 {fmt_signed_int(futures_delta, ' 口')}",
                 chips.futures_date,
+            )
+        )
+
+    if night_session and (
+        night_session.change_pct is not None or night_session.change is not None
+    ):
+        pct_move = night_session.change_pct
+        if pct_move is None and night_session.last and night_session.change is not None:
+            previous = night_session.last - night_session.change
+            pct_move = pct_change(night_session.last, previous) if previous else 0.0
+        contribution = clamp((pct_move or 0.0) / 1.0, -1.0, 1.0)
+        move_word = "上漲" if (pct_move or 0) > 0 else "下跌" if (pct_move or 0) < 0 else "平盤"
+        factors.append(
+            ForecastFactor(
+                "台指期夜盤",
+                contribution,
+                f"{night_session.session} {night_session.contract_month} "
+                f"收 {fmt(night_session.last, ' 點', 0)}，{move_word} "
+                f"{fmt_signed_int(int(night_session.change or 0), ' 點')} / "
+                f"{fmt_change(pct_move)}，量 {night_session.volume:,} 口",
+                night_session.data_date,
             )
         )
 
@@ -1522,7 +1615,7 @@ def next_session_forecast_section(
         f"- {direction_marker(item.contribution)} {item.name}：{item.evidence}"
         f"{f'（資料日 {item.data_date}）' if item.data_date else ''}；"
         f"模型貢獻 {item.contribution:+.2f}。"
-        for item in forecast.factors[:5]
+        for item in forecast.factors[:6]
     ]
     return [
         "## 次一交易日大盤方向推估",
@@ -2350,7 +2443,7 @@ def build_markdown(
             "",
             "- TWSE OpenAPI：上市行情、估值、月營收與每日重大訊息。",
             "- TPEx OpenAPI：上櫃行情、估值、月營收與每日重大訊息。",
-            "- TAIFEX OpenAPI：臺股期貨三大法人與小型臺指期貨未平倉部位。",
+            "- TAIFEX OpenAPI：臺股期貨三大法人、小型臺指期貨未平倉部位與期貨每日行情盤後盤。",
             "- TDCC OpenAPI：集保股權分散表與千張以上持股比重。",
             "- FinMind：個股與 ETF 歷史日行情、新聞、三大法人、期貨選擇權、融資融券與財報欄位。",
             "- Yahoo Finance Chart：美股指數、半導體、匯率、利率與商品價格。",
@@ -2569,7 +2662,7 @@ def finance_report_dashboard(
     <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
     <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
   </section>
-  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次一交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次一交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、台指期夜盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
 </section>
 """
 
@@ -2690,7 +2783,14 @@ def run(mode: str) -> tuple[Path, Path]:
     health = market_health(securities, candidates)
     health.retail_mtx_sentiment = load_non_institution_mtx_sentiment(report_date)
     chips = load_chip_context(candidates, report_date)
-    forecast = estimate_next_session(international, health, chips, report_date)
+    night_session = load_tx_night_session(report_date)
+    forecast = estimate_next_session(
+        international,
+        health,
+        chips,
+        report_date,
+        night_session=night_session,
+    )
     markdown = build_markdown(
         mode,
         candidates,
