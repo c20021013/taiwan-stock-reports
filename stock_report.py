@@ -2714,7 +2714,7 @@ def markdown_to_html(markdown: str, title: str, dashboard: str = "") -> str:
             if all(set(cell) <= {"-", ":"} for cell in cells):
                 continue
             if not in_table:
-                blocks.append("<table>")
+                blocks.append('<div class="table-scroll"><table>')
                 in_table = True
             tag = "th" if not any("<tr>" in item for item in blocks[-2:]) else "td"
             blocks.append(
@@ -2722,7 +2722,7 @@ def markdown_to_html(markdown: str, title: str, dashboard: str = "") -> str:
             )
             continue
         if in_table:
-            blocks.append("</table>")
+            blocks.append("</table></div>")
             in_table = False
         if line.startswith("- "):
             if not in_list:
@@ -2748,7 +2748,7 @@ def markdown_to_html(markdown: str, title: str, dashboard: str = "") -> str:
         else:
             blocks.append(f"<p>{inline_html(line)}</p>")
     if in_table:
-        blocks.append("</table>")
+        blocks.append("</table></div>")
     if in_list:
         blocks.append("</ul>")
 
@@ -2759,34 +2759,50 @@ def markdown_to_html(markdown: str, title: str, dashboard: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-:root {{ color-scheme: light; --ink:#172033; --muted:#617087; --line:#dce3ed; --navy:#102a56; --panel:#ffffff; --canvas:#f4f7fb; --red:#cf3945; --green:#16835e; --gold:#d9a441; }}
+:root {{ color-scheme: dark; --ink:#f8fafc; --muted:#cbd5e1; --soft:#94a3b8; --line:#334155; --navy:#e2e8f0; --panel:#0f172a; --panel-2:#111827; --canvas:#020617; --red:#f87171; --green:#22c55e; --gold:#fbbf24; --accent:#38bdf8; --shadow:0 18px 48px #00000040; --radius:18px; }}
 * {{ box-sizing: border-box; }}
-body {{ font-family: system-ui, "Microsoft JhengHei", sans-serif; max-width: 1180px;
-       margin: 32px auto; padding: 0 20px 56px; color: var(--ink); line-height: 1.65; background:var(--canvas); }}
-body > h1, body > h2, body > h3, body > p, body > ul, body > blockquote, body > table {{ background:var(--panel); }}
-h1, h2, h3 {{ color: var(--navy); }} h2 {{ margin-top: 40px; }}
-blockquote {{ border-left: 4px solid var(--gold); margin: 16px 0; padding: 10px 16px; background: #fff8e8; }}
-table {{ width: 100%; border-collapse: collapse; margin: 16px 0 28px; font-size: 14px; background:var(--panel); }}
-th, td {{ border: 1px solid var(--line); padding: 8px; text-align: left; vertical-align:top; }}
-th {{ background: #edf3fb; position: sticky; top: 0; z-index: 1; }} tr:nth-child(even) {{ background: #f8fafc; }}
+html {{ scroll-behavior:smooth; }}
+body {{ font-family:"Fira Sans", system-ui, "Microsoft JhengHei", sans-serif; max-width:1220px;
+       margin:32px auto; padding:0 20px 56px; color:var(--ink); line-height:1.65; background:
+       radial-gradient(circle at 14% 0%, #164e6338, transparent 34%),
+       radial-gradient(circle at 86% 6%, #14532d42, transparent 32%),
+       var(--canvas); }}
+.skip-link {{ position:absolute; left:20px; top:-60px; z-index:1000; padding:10px 14px; border-radius:10px; background:var(--accent); color:#00111f; font-weight:800; text-decoration:none; transition:top .18s ease-out; }}
+.skip-link:focus {{ top:14px; }}
+main {{ display:block; }}
+body h1, body h2, body h3 {{ color:var(--navy); letter-spacing:-.02em; }} h2 {{ margin-top:40px; }}
+main > h1, main > h2, main > h3, main > p, main > ul, main > blockquote, main > .table-scroll {{ background:linear-gradient(180deg,#111827,#0f172a); border:1px solid var(--line); border-radius:var(--radius); box-shadow:0 10px 28px #00000024; }}
+main > h1, main > h2, main > h3 {{ padding:18px 22px; margin-bottom:12px; }}
+main > p, main > ul {{ padding:16px 22px; margin:12px 0; }}
+main > ul {{ padding-left:42px; }}
+blockquote {{ border-left:4px solid var(--gold); margin:16px 0; padding:12px 16px; background:#1f2937; color:#fde68a; }}
+table {{ width:100%; min-width:760px; border-collapse:separate; border-spacing:0; margin:0; font-size:14px; background:var(--panel); }}
+th, td {{ border-bottom:1px solid var(--line); padding:10px 11px; text-align:left; vertical-align:top; }}
+th {{ background:#1e293b; color:#e2e8f0; position:sticky; top:0; z-index:1; }} tr:nth-child(even) {{ background:#111c2e; }} tr:hover {{ background:#1e293b; }}
+td, .kpi-value, .forecast-row strong, .bar-value {{ font-variant-numeric:tabular-nums; }}
+a {{ color:#7dd3fc; }} a:focus-visible, summary:focus-visible {{ outline:3px solid var(--accent); outline-offset:3px; border-radius:8px; }}
 .finance-dashboard {{ margin:0 0 38px; }}
-.finance-masthead {{ padding:32px; border-radius:20px; color:#fff; background:linear-gradient(135deg,#102a56,#215a93 62%,#2f8b8b); box-shadow:0 12px 30px #102a5630; }}
-.finance-masthead h1 {{ margin:5px 0 8px; color:#fff; font-size:clamp(28px,4vw,44px); line-height:1.2; }} .finance-masthead p {{ margin:0; color:#e8f0fb; }}
-.eyebrow,.panel-heading p,.kpi-label {{ margin:0; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }} .finance-masthead .eyebrow {{ color:#b9d9ff; }}
+.finance-masthead {{ padding:32px; border-radius:24px; color:#fff; background:linear-gradient(135deg,#0f172a,#075985 58%,#166534); box-shadow:var(--shadow); border:1px solid #38bdf855; }}
+.finance-masthead h1 {{ margin:5px 0 8px; color:#fff; font-size:clamp(28px,4vw,44px); line-height:1.2; }} .finance-masthead p {{ margin:0; color:#dbeafe; }}
+.eyebrow,.panel-heading p,.kpi-label {{ margin:0; color:var(--soft); font-size:12px; font-weight:800; letter-spacing:.09em; text-transform:uppercase; }} .finance-masthead .eyebrow {{ color:#bae6fd; }}
 .kpi-grid,.dashboard-grid {{ display:grid; gap:16px; margin-top:16px; }} .kpi-grid {{ grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }} .dashboard-grid {{ grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }}
-.kpi-card,.dashboard-panel {{ background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; box-shadow:0 4px 14px #102a5609; }}
-.kpi-card {{ border-top:4px solid #8ca0b8; }} .kpi-up {{ border-top-color:var(--red); }} .kpi-down {{ border-top-color:var(--green); }} .kpi-value {{ margin:7px 0 3px; color:var(--navy); font-size:25px; font-weight:800; }} .kpi-detail,.chart-note {{ margin:0; color:var(--muted); font-size:13px; }}
-.panel-heading h2 {{ margin:2px 0 18px; font-size:20px; }} .bar-row {{ display:grid; grid-template-columns:minmax(95px,1fr) 2fr 62px; gap:9px; align-items:center; margin:12px 0; font-size:13px; }} .bar-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .bar-track {{ height:10px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .bar-fill {{ display:block; height:100%; border-radius:inherit; }} .bar-fill.up {{ background:var(--red); }} .bar-fill.down {{ background:var(--green); }} .bar-value {{ text-align:right; }} .bar-value.up {{ color:var(--red); }} .bar-value.down {{ color:var(--green); }}
-.breadth-track {{ display:flex; height:24px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .breadth-up {{ background:var(--red); }} .breadth-flat {{ background:#9daabd; }} .breadth-down {{ background:var(--green); }} .breadth-legend {{ display:flex; flex-wrap:wrap; gap:12px; padding:0; margin:16px 0 0; list-style:none; font-size:13px; }} .legend-dot {{ display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; }}
-.forecast-row {{ display:grid; grid-template-columns:42px 1fr 54px; gap:10px; align-items:center; margin:13px 0; font-size:13px; }} .forecast-track {{ height:13px; overflow:hidden; border-radius:99px; background:#e7edf5; }} .forecast-fill {{ display:block; height:100%; border-radius:inherit; }} .forecast-fill.up {{ background:var(--red); }} .forecast-fill.flat {{ background:#9daabd; }} .forecast-fill.down {{ background:var(--green); }} .forecast-row strong {{ text-align:right; }}
-.financial-summary {{ margin-top:16px; }} .table-scroll {{ overflow-x:auto; }} .financial-summary table {{ margin:0; }} .highlight-list {{ margin:0; padding-left:20px; }} .highlight-list li {{ margin:10px 0; }} .outlook-copy {{ margin:0; font-size:16px; }} .methodology {{ margin-top:16px; padding:16px 20px; border:1px solid var(--line); border-radius:14px; background:#edf3fb; }} .methodology summary {{ color:var(--navy); cursor:pointer; font-weight:800; }} .methodology p {{ margin:12px 0 0; color:#43516a; }} .chart-empty {{ margin:0; color:var(--muted); }}
-@media (max-width:800px) {{ body {{ margin:0 auto; padding:12px 12px 38px; }} .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr 1fr; }} .finance-masthead {{ padding:24px; }} }}
-@media (max-width:520px) {{ .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr; }} .bar-row {{ grid-template-columns:90px 1fr 54px; gap:6px; }} table {{ font-size:12px; }} th,td {{ padding:6px; }} }}
+.kpi-card,.dashboard-panel {{ background:linear-gradient(180deg,#111827,#0f172a); border:1px solid var(--line); border-radius:var(--radius); padding:20px; box-shadow:0 10px 28px #00000024; }}
+.kpi-card {{ border-top:4px solid #64748b; transition:transform .18s ease-out, border-color .18s ease-out; }} .kpi-card:hover,.dashboard-panel:hover {{ border-color:#64748b; }} .kpi-up {{ border-top-color:var(--red); }} .kpi-down {{ border-top-color:var(--green); }} .kpi-value {{ margin:7px 0 3px; color:#fff; font-size:25px; font-weight:850; }} .kpi-detail,.chart-note {{ margin:0; color:var(--muted); font-size:13px; }}
+.panel-heading h2 {{ margin:2px 0 18px; font-size:20px; }} .bar-row {{ display:grid; grid-template-columns:minmax(95px,1fr) 2fr 68px; gap:10px; align-items:center; margin:12px 0; font-size:13px; }} .bar-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .bar-track {{ height:10px; overflow:hidden; border-radius:99px; background:#26364d; }} .bar-fill {{ display:block; height:100%; border-radius:inherit; }} .bar-fill.up {{ background:linear-gradient(90deg,#fb7185,var(--red)); }} .bar-fill.down {{ background:linear-gradient(90deg,#34d399,var(--green)); }} .bar-value {{ text-align:right; font-family:"Fira Code", ui-monospace, monospace; }} .bar-value.up {{ color:#fecdd3; }} .bar-value.down {{ color:#bbf7d0; }}
+.breadth-track {{ display:flex; height:24px; overflow:hidden; border-radius:99px; background:#26364d; }} .breadth-up {{ background:var(--red); }} .breadth-flat {{ background:#94a3b8; }} .breadth-down {{ background:var(--green); }} .breadth-legend {{ display:flex; flex-wrap:wrap; gap:12px; padding:0; margin:16px 0 0; list-style:none; font-size:13px; }} .legend-dot {{ display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; }}
+.forecast-intro {{ margin-bottom:10px; }} .forecast-row {{ display:grid; grid-template-columns:42px 1fr 62px; gap:10px; align-items:center; margin:13px 0; font-size:13px; }} .forecast-track {{ height:13px; overflow:hidden; border-radius:99px; background:#26364d; }} .forecast-fill {{ display:block; height:100%; border-radius:inherit; }} .forecast-fill.up {{ background:var(--red); }} .forecast-fill.flat {{ background:#94a3b8; }} .forecast-fill.down {{ background:var(--green); }} .forecast-row strong {{ text-align:right; font-family:"Fira Code", ui-monospace, monospace; }}
+.financial-summary {{ margin-top:16px; }} .table-scroll {{ overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:var(--radius); }} .financial-summary table {{ margin:0; }} .highlight-list {{ margin:0; padding-left:20px; }} .highlight-list li {{ margin:10px 0; }} .outlook-copy {{ margin:0; font-size:16px; }} .methodology {{ margin-top:16px; padding:16px 20px; border:1px solid var(--line); border-radius:14px; background:#0f172a; }} .methodology summary {{ color:var(--navy); cursor:pointer; font-weight:800; min-height:44px; display:flex; align-items:center; }} .methodology p {{ margin:12px 0 0; color:var(--muted); }} .chart-empty {{ margin:0; color:var(--muted); }}
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation-duration:.01ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; transition-duration:.01ms !important; }} }}
+@media (max-width:800px) {{ body {{ margin:0 auto; padding:12px 12px 38px; }} .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr 1fr; }} .finance-masthead {{ padding:24px; }} main > h1, main > h2, main > h3, main > p, main > ul {{ padding-left:16px; padding-right:16px; }} }}
+@media (max-width:520px) {{ .kpi-grid,.dashboard-grid {{ grid-template-columns:1fr; }} .bar-row {{ grid-template-columns:90px 1fr 58px; gap:6px; }} table {{ font-size:12px; min-width:680px; }} th,td {{ padding:8px; }} }}
 </style>
 </head>
 <body>
+<a class="skip-link" href="#report-content">跳到主要內容</a>
+<main id="report-content" tabindex="-1">
 {dashboard}
 {''.join(blocks)}
+</main>
 </body>
 </html>
 """

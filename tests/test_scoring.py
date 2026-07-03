@@ -722,6 +722,11 @@ class ScoringTests(unittest.TestCase):
         self.assertIn("次交易日推估", dashboard)
         self.assertIn("方向機率", dashboard)
         self.assertIn("方法論與資料限制", dashboard)
+        self.assertIn("skip-link", rendered)
+        self.assertIn('id="report-content"', rendered)
+        self.assertIn("color-scheme: dark", rendered)
+        self.assertIn("prefers-reduced-motion", rendered)
+        self.assertIn('class="table-scroll"', rendered)
         self.assertNotIn("chart.js", rendered.lower())
         self.assertEqual(rendered.count("<h1>台股每日研究報告</h1>"), 1)
 
