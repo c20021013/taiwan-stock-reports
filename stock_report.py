@@ -47,6 +47,7 @@ TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_VALUE_URL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 TWSE_REVENUE_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
 TWSE_MATERIAL_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
+TWSE_HOLIDAY_URL = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule"
 TPEX_DAILY_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 TPEX_VALUE_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
 TPEX_REVENUE_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
@@ -657,6 +658,74 @@ def parse_row_date(row: dict[str, Any]) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def is_twse_closed_day(row: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(row.get(key, "") or "")
+        for key in ("Name", "Description", "名稱", "說明")
+    )
+    if "開始交易" in text or "最後交易" in text:
+        return False
+    return any(
+        token in text
+        for token in ("放假", "無交易", "停止交易", "休市", "補假")
+    )
+
+
+def load_twse_closed_dates(as_of: date | None = None) -> set[date]:
+    rows = fetch_optional_json(
+        TWSE_HOLIDAY_URL,
+        "twse_holiday_schedule.json",
+        24 * 60,
+    )
+    if not isinstance(rows, list):
+        return set()
+    return {
+        row_date
+        for row in rows
+        if (row_date := parse_row_date(row)) is not None
+        and (as_of is None or row_date.year >= as_of.year)
+        and is_twse_closed_day(row)
+    }
+
+
+def next_taiwan_trading_day_on_or_after(
+    start: date,
+    closed_dates: set[date] | None = None,
+) -> date:
+    closed = closed_dates or set()
+    candidate = start
+    for _ in range(370):
+        if candidate.weekday() < 5 and candidate not in closed:
+            return candidate
+        candidate += timedelta(days=1)
+    raise RuntimeError("Unable to determine next Taiwan trading day")
+
+
+def target_trading_day(
+    generated_at: datetime,
+    closed_dates: set[date] | None = None,
+) -> date:
+    start = generated_at.date()
+    if (generated_at.hour, generated_at.minute) >= (13, 35):
+        start += timedelta(days=1)
+    return next_taiwan_trading_day_on_or_after(start, closed_dates)
+
+
+def official_target_trading_day(generated_at: datetime) -> date:
+    return target_trading_day(
+        generated_at,
+        load_twse_closed_dates(generated_at.date()),
+    )
+
+
+def forecast_date_text(target_date: date | None) -> str:
+    return target_date.isoformat() if target_date else "次交易日"
+
+
+def forecast_heading_text(target_date: date | None) -> str:
+    return f"{forecast_date_text(target_date)} 推估"
 
 
 def normalize_taifex_text(value: Any) -> str:
@@ -1632,7 +1701,10 @@ def estimate_next_session(
 
 def next_session_forecast_section(
     forecast: NextSessionForecast,
+    target_date: date | None = None,
 ) -> list[str]:
+    target_text = forecast_date_text(target_date)
+    heading_text = forecast_heading_text(target_date)
     marker = {"上漲": "🔴", "平盤": "⚪", "下跌": "🟢"}[forecast.label]
     factor_lines = [
         f"- {direction_marker(item.contribution)} {item.name}：{item.evidence}"
@@ -1641,9 +1713,9 @@ def next_session_forecast_section(
         for item in forecast.factors[:6]
     ]
     return [
-        "## 次交易日推估",
+        f"## {heading_text}",
         "",
-        "> 預測對象為臺灣加權股價指數次交易日收盤相對前一交易日收盤；"
+        f"> 預測對象為臺灣加權股價指數 {target_text} 收盤相對前一交易日收盤；"
         "上漲與下跌門檻為 ±0.3%，介於其間定義為平盤。",
         "",
         f"- 目前猜測：{marker} **{forecast.label}**；可信度："
@@ -1660,17 +1732,18 @@ def next_session_forecast_section(
         "",
         f"- 反證條件：{forecast.invalidation}",
         "- 這是規則型情境推估，不是報酬保證；突發政策、戰事、天災或公司重大訊息"
-        "可能使次交易日走勢完全不同。單一方向機率上限為 60%，並應以每日累積命中紀錄"
+        f"可能使 {target_text} 走勢完全不同。單一方向機率上限為 60%，並應以每日累積命中紀錄"
         "校準，不因單次猜對就提高信任。",
         "",
     ]
 
 
-def reader_guide_section() -> list[str]:
+def reader_guide_section(target_date: date | None = None) -> list[str]:
+    heading_text = forecast_heading_text(target_date)
     return [
         "## 怎麼讀這份報告",
         "",
-        "- 先看盤前速覽與次交易日推估，掌握大盤風向、方向機率與反證條件。",
+        f"- 先看盤前速覽與 {heading_text}，掌握大盤風向、方向機率與反證條件。",
         "- 再看國際情勢、資金健康度與籌碼，確認推估是由哪些外部事件或資金流支撐。",
         "- 最後看建議標的，重點放在營收、重大訊息、產業催化與估值是否互相支持。",
         "",
@@ -1895,6 +1968,7 @@ def executive_summary_section(
     health: MarketHealth,
     chips: ChipContext,
     forecast: NextSessionForecast | None = None,
+    target_date: date | None = None,
 ) -> list[str]:
     breadth_total = health.up_count + health.down_count + health.flat_count
     if breadth_total:
@@ -1970,6 +2044,7 @@ def executive_summary_section(
         "平盤": "⚪",
         "下跌": "🟢",
     }[current_forecast.label]
+    target_text = forecast_date_text(target_date)
 
     return [
         "## 盤前速覽（以前一交易日資料為主）(TL;DR)",
@@ -1977,7 +2052,7 @@ def executive_summary_section(
         f"- 大盤結構：{breadth}{sector}；{sector_note}。",
         f"- 籌碼動向：{chip_line}",
         f"- 風險提示：{risk_line}",
-        f"- 次交易日：{forecast_marker} 猜測{current_forecast.label}，"
+        f"- {target_text}：{forecast_marker} 猜測{current_forecast.label}，"
         f"上漲／平盤／下跌機率為 {current_forecast.up_probability:.1f}%／"
         f"{current_forecast.flat_probability:.1f}%／"
         f"{current_forecast.down_probability:.1f}%，可信度"
@@ -2369,6 +2444,7 @@ def build_markdown(
     health: MarketHealth | None = None,
     chips: ChipContext | None = None,
     forecast: NextSessionForecast | None = None,
+    target_date: date | None = None,
 ) -> str:
     stocks = sorted(
         [item for item in candidates if not item.is_etf and item.score > 0],
@@ -2386,6 +2462,7 @@ def build_markdown(
     financial_stocks = [item for item in stocks if is_financial_stock(item)][:8]
     title = report_title(mode, generated_at.date())
     current_forecast = forecast or neutral_next_session_forecast()
+    current_target_date = target_date or target_trading_day(generated_at)
 
     intro = [
         f"# {title}",
@@ -2425,9 +2502,10 @@ def build_markdown(
             health or MarketHealth(),
             chips or ChipContext(),
             current_forecast,
+            current_target_date,
         )
-        + next_session_forecast_section(current_forecast)
-        + reader_guide_section()
+        + next_session_forecast_section(current_forecast, current_target_date)
+        + reader_guide_section(current_target_date)
         + international_section(international or [])
         + market_health_section(health or MarketHealth())
         + chip_section(chips or ChipContext())
@@ -2611,6 +2689,7 @@ def finance_report_dashboard(
     health: MarketHealth,
     chips: ChipContext,
     forecast: NextSessionForecast | None = None,
+    target_date: date | None = None,
 ) -> str:
     """Render the finance-report skill as a self-contained report overview."""
     current_forecast = forecast or neutral_next_session_forecast()
@@ -2644,8 +2723,10 @@ def finance_report_dashboard(
         f"電子 {pct_text(health.electronic_ratio)}｜金融 {pct_text(health.financial_ratio)}"
     )
     top_reason = stocks[0].reasons[0] if stocks and stocks[0].reasons else "等待公司事件與營收資料確認"
+    target_text = forecast_date_text(target_date)
+    target_heading = forecast_heading_text(target_date)
     highlights = [
-        f"次交易日推估：{current_forecast.label}；上漲、平盤、下跌機率為 "
+        f"{target_heading}：{current_forecast.label}；上漲、平盤、下跌機率為 "
         f"{current_forecast.up_probability:.1f}%、{current_forecast.flat_probability:.1f}%、"
         f"{current_forecast.down_probability:.1f}%，可信度{current_forecast.confidence}。",
         f"市場廣度：上漲 {health.up_count:,} 家、下跌 {health.down_count:,} 家，報告以全市場漲跌家數判讀盤面結構。",
@@ -2655,7 +2736,7 @@ def finance_report_dashboard(
         f"最高分候選：{stocks[0].symbol} {stocks[0].name}，首要研究線索為「{top_reason}」。" if stocks else "候選清單資料暫缺。",
     ]
     outlook = (
-        f"次交易日目前以{current_forecast.label}情境機率最高，但仍須驗證"
+        f"{target_text} 目前以{current_forecast.label}情境機率最高，但仍須驗證"
         f"{current_forecast.invalidation}"
         "公司研究部分則持續檢查月營收、獲利與重大訊息是否支持需求改善。"
     )
@@ -2668,7 +2749,7 @@ def finance_report_dashboard(
     <p>資料時間：{generated_at:%Y-%m-%d %H:%M}（Asia/Taipei）｜以公開資料建立的研究總覽</p>
   </header>
   <section class="kpi-grid" aria-label="核心 KPI">
-    {dashboard_metric("次交易日推估", current_forecast.label, f"漲 {current_forecast.up_probability:.1f}%｜平 {current_forecast.flat_probability:.1f}%｜跌 {current_forecast.down_probability:.1f}%", "up" if current_forecast.label == "上漲" else "down" if current_forecast.label == "下跌" else "neutral")}
+    {dashboard_metric(target_heading, current_forecast.label, f"漲 {current_forecast.up_probability:.1f}%｜平 {current_forecast.flat_probability:.1f}%｜跌 {current_forecast.down_probability:.1f}%", "up" if current_forecast.label == "上漲" else "down" if current_forecast.label == "下跌" else "neutral")}
     {dashboard_metric("市場廣度", breadth, "上漲 / 下跌家數", "up" if health.up_count >= health.down_count else "down")}
     {dashboard_metric("電子成交比重", pct_text(health.electronic_ratio), sector_detail, "neutral")}
     {dashboard_metric("法人現貨合計", institutional_value, institutional_detail, "up" if (institutional or 0) > 0 else "down" if (institutional or 0) < 0 else "neutral")}
@@ -2685,7 +2766,7 @@ def finance_report_dashboard(
       <p class="chart-note">以漲跌家數替代企業燒錢指標，避免把不適用的公司財報概念套到台股大盤。</p>
     </article>
     <article class="dashboard-panel">
-      <div class="panel-heading"><p>Next Trading Day</p><h2>次交易日推估</h2></div>
+      <div class="panel-heading"><p>Next Trading Day</p><h2>{html.escape(target_heading)}</h2></div>
       {dashboard_forecast_chart(current_forecast)}
     </article>
   </section>
@@ -2698,7 +2779,7 @@ def finance_report_dashboard(
     <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
     <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
   </section>
-  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。次交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、期貨盤後盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。目標交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、期貨盤後盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
 </section>
 """
 
@@ -2825,6 +2906,7 @@ def output_paths(mode: str, today: date) -> tuple[Path, Path]:
 def run(mode: str) -> tuple[Path, Path]:
     generated_at = datetime.now(TAIPEI_TZ)
     report_date = generated_at.date()
+    target_date = official_target_trading_day(generated_at)
     config = load_config()
     securities = load_market_data(config)
     candidates = select_candidates(securities, config)
@@ -2851,12 +2933,13 @@ def run(mode: str) -> tuple[Path, Path]:
         health,
         chips,
         forecast,
+        target_date,
     )
     title = report_title(mode, report_date)
     md_path, html_path = output_paths(mode, report_date)
     md_path.write_text(markdown, encoding="utf-8")
     dashboard = finance_report_dashboard(
-        title, mode, candidates, generated_at, health, chips, forecast
+        title, mode, candidates, generated_at, health, chips, forecast, target_date
     )
     html_path.write_text(markdown_to_html(markdown, title, dashboard), encoding="utf-8")
     (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")

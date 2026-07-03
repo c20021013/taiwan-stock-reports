@@ -20,7 +20,8 @@ class PublishTests(unittest.TestCase):
     def test_current_report_validation_accepts_full_report(self):
         content = """
         <section class="finance-dashboard"></section>
-        <h2>次交易日推估</h2>
+        <p>Next Trading Day</p>
+        <h2>2026-07-03 推估</h2>
         <p>方向機率</p>
         """
         publish_report.validate_current_report_html(

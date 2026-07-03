@@ -17,6 +17,55 @@ class ScoringTests(unittest.TestCase):
         self.assertGreater(metrics["latest"], metrics["ma20"])
         self.assertGreater(metrics["latest"], metrics["ma60"])
 
+    def test_target_trading_day_uses_current_premarket_session(self):
+        generated_at = datetime(2026, 7, 3, 8, 0, tzinfo=stock_report.TAIPEI_TZ)
+
+        self.assertEqual(
+            stock_report.target_trading_day(generated_at, set()),
+            date(2026, 7, 3),
+        )
+
+    def test_target_trading_day_moves_after_close(self):
+        generated_at = datetime(2026, 7, 3, 14, 0, tzinfo=stock_report.TAIPEI_TZ)
+
+        self.assertEqual(
+            stock_report.target_trading_day(generated_at, set()),
+            date(2026, 7, 6),
+        )
+
+    def test_target_trading_day_skips_official_closed_date(self):
+        generated_at = datetime(2026, 7, 3, 14, 0, tzinfo=stock_report.TAIPEI_TZ)
+
+        self.assertEqual(
+            stock_report.target_trading_day(
+                generated_at,
+                {date(2026, 7, 6)},
+            ),
+            date(2026, 7, 7),
+        )
+
+    def test_twse_closed_day_classification_keeps_opening_notes(self):
+        self.assertFalse(
+            stock_report.is_twse_closed_day(
+                {"Name": "國曆新年開始交易日", "Description": "開始交易。"}
+            )
+        )
+        self.assertFalse(
+            stock_report.is_twse_closed_day(
+                {"Name": "農曆春節前最後交易日", "Description": "最後交易。"}
+            )
+        )
+        self.assertTrue(
+            stock_report.is_twse_closed_day(
+                {"Name": "市場無交易，僅辦理結算交割作業", "Description": ""}
+            )
+        )
+        self.assertTrue(
+            stock_report.is_twse_closed_day(
+                {"Name": "農曆除夕及春節", "Description": "依規定放假。"}
+            )
+        )
+
     def test_growth_stock_receives_higher_score_than_declining_stock(self):
         history_up = [
             {"close": 100 + index * 0.8, "Trading_Volume": 1_000_000}
@@ -226,7 +275,10 @@ class ScoringTests(unittest.TestCase):
             date(2026, 6, 28),
         )
         section = "\n".join(
-            stock_report.next_session_forecast_section(forecast)
+            stock_report.next_session_forecast_section(
+                forecast,
+                date(2026, 6, 29),
+            )
         )
 
         self.assertEqual(forecast.label, "上漲")
@@ -247,6 +299,7 @@ class ScoringTests(unittest.TestCase):
             60.0,
         )
         self.assertIn("±0.3%", section)
+        self.assertIn("## 2026-06-29 推估", section)
         self.assertIn("規則型情境推估", section)
         self.assertIn("反證條件", section)
 
@@ -450,10 +503,16 @@ class ScoringTests(unittest.TestCase):
         )
 
         section = "\n".join(
-            stock_report.executive_summary_section(indicators, health, chips)
+            stock_report.executive_summary_section(
+                indicators,
+                health,
+                chips,
+                target_date=date(2026, 6, 17),
+            )
         )
 
         self.assertIn("盤前速覽（以前一交易日資料為主）(TL;DR)", section)
+        self.assertIn("- 2026-06-17：", section)
         self.assertIn("🟢 前一交易日跌多漲少", section)
         self.assertIn("電子股 71.3%", section)
         self.assertIn("🟢 外資現貨賣超 50.0 億", section)
@@ -710,6 +769,7 @@ class ScoringTests(unittest.TestCase):
             datetime(2026, 6, 27, 8, 0, tzinfo=stock_report.TAIPEI_TZ),
             health,
             chips,
+            target_date=date(2026, 6, 29),
         )
         rendered = stock_report.markdown_to_html(
             "# 台股每日研究報告\n\n## 市場內容",
@@ -719,7 +779,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertIn("候選標的月營收年增率", dashboard)
         self.assertIn("市場廣度與壓力", dashboard)
-        self.assertIn("次交易日推估", dashboard)
+        self.assertIn("2026-06-29 推估", dashboard)
         self.assertIn("方向機率", dashboard)
         self.assertIn("方法論與資料限制", dashboard)
         self.assertIn("skip-link", rendered)

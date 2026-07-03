@@ -57,7 +57,6 @@ def validate(mode: str) -> list[str]:
 
     required_text = [
         "## 盤前速覽（以前一交易日資料為主）(TL;DR)",
-        "## 次交易日推估",
         "## 怎麼讀這份報告",
         "## 國際情勢與台股影響",
         "## 2.5 台股大盤與資金健康度",
@@ -87,10 +86,20 @@ def validate(mode: str) -> list[str]:
     if "股市爆料同學會" in markdown or "CMoney投資網誌" in markdown:
         errors.append("Low-quality forum news is present")
 
+    forecast_heading_match = re.search(
+        r"^## 20\d{2}-\d{2}-\d{2} 推估$",
+        markdown,
+        flags=re.MULTILINE,
+    )
+    if not forecast_heading_match:
+        errors.append("Next-session forecast heading must use a concrete date")
+
     try:
+        if not forecast_heading_match:
+            raise AssertionError("Missing dated next-session forecast heading")
         forecast_section = section(
             markdown,
-            "## 次交易日推估",
+            forecast_heading_match.group(0),
             "## 怎麼讀這份報告",
         )
         probability_match = re.search(
@@ -158,16 +167,25 @@ def validate(mode: str) -> list[str]:
             dated_sections = section(
                 markdown, "## 2.5 台股大盤與資金健康度", "## 建議投資股票及原因"
             )
-            dated_sections += section(
-                markdown,
-                "## 次交易日推估",
-                "## 怎麼讀這份報告",
-            )
             for found in re.findall(r"20\d{2}-\d{2}-\d{2}", dated_sections):
                 if date.fromisoformat(found) > report_date:
                     errors.append(
                         f"Chip data date {found} is later than report date {report_date}"
                     )
+            if forecast_heading_match:
+                forecast_section = section(
+                    markdown,
+                    forecast_heading_match.group(0),
+                    "## 怎麼讀這份報告",
+                )
+                for found in re.findall(
+                    r"資料日\s*(20\d{2}-\d{2}-\d{2})",
+                    forecast_section,
+                ):
+                    if date.fromisoformat(found) > report_date:
+                        errors.append(
+                            f"Forecast factor date {found} is later than report date {report_date}"
+                        )
         except AssertionError as exc:
             errors.append(str(exc))
 
