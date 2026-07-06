@@ -109,6 +109,30 @@ def validate_current_report_html(content: str, repository_path: str) -> None:
         )
 
 
+def latest_alias_paths(repository_path: str) -> list[str]:
+    paths = ["index.html", "reports/latest.html"]
+    parts = repository_path.split("/")
+    if len(parts) >= 3 and parts[0] == "reports":
+        paths.append(f"reports/{parts[1]}/latest.html")
+    return paths
+
+
+def publish_latest_aliases(
+    repository: str,
+    content: str,
+    token: str,
+    source_path: str,
+) -> None:
+    for alias_path in latest_alias_paths(source_path):
+        put_text_file(
+            repository,
+            alias_path,
+            content,
+            token,
+            "Update latest report",
+        )
+
+
 def publish_file(html_path: Path, repository: str, token: str) -> str:
     repository_path = report_repository_path(html_path)
     content = html_path.read_text(encoding="utf-8")
@@ -120,13 +144,7 @@ def publish_file(html_path: Path, repository: str, token: str) -> str:
         token,
         f"Publish {repository_path}",
     )
-    put_text_file(
-        repository,
-        "index.html",
-        content,
-        token,
-        "Update latest report",
-    )
+    publish_latest_aliases(repository, content, token, repository_path)
     put_text_file(repository, ".nojekyll", "", token, "Configure GitHub Pages")
     return repository_path
 
@@ -146,12 +164,11 @@ def publish_all(repository: str, token: str) -> list[str]:
         paths.append(repository_path)
     latest_html = REPORTS_DIR / "latest.html"
     if latest_html.exists():
-        put_text_file(
+        publish_latest_aliases(
             repository,
-            "index.html",
             latest_html.read_text(encoding="utf-8"),
             token,
-            "Publish latest report",
+            "reports/latest.html",
         )
     put_text_file(repository, ".nojekyll", "", token, "Configure GitHub Pages")
     return paths

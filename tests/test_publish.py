@@ -35,6 +35,22 @@ class PublishTests(unittest.TestCase):
                 content, "reports/daily/2026-06-30.html"
             )
 
+    def test_latest_alias_paths_include_global_and_mode_aliases(self):
+        self.assertEqual(
+            publish_report.latest_alias_paths("reports/daily/2026-07-06.html"),
+            [
+                "index.html",
+                "reports/latest.html",
+                "reports/daily/latest.html",
+            ],
+        )
+
+    def test_latest_alias_paths_for_root_latest(self):
+        self.assertEqual(
+            publish_report.latest_alias_paths("reports/latest.html"),
+            ["index.html", "reports/latest.html"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
