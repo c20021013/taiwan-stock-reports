@@ -11,6 +11,11 @@ on:
         options:
           - daily
           - weekly
+      notify:
+        description: Send Discord/LINE notification for this manual run
+        required: true
+        default: false
+        type: boolean
   schedule:
     # Start early in the cloud, then wait until Asia/Taipei 08:00.
     - cron: "0 22 * * 0-4"
@@ -118,4 +123,6 @@ jobs:
         run: python publish_report.py --mode "${{ steps.mode.outputs.mode }}"
 
       - name: Send notification
+        env:
+          ALLOW_MANUAL_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.notify || '' }}
         run: python notify_report.py --mode "${{ steps.mode.outputs.mode }}"

@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -64,6 +65,28 @@ class NotificationTests(unittest.TestCase):
             url,
             "https://example.com/base/reports/daily/2026-06-13.html",
         )
+
+    def test_scheduled_github_action_can_notify(self):
+        env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            allowed, reason = notify_report.notifications_allowed()
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
+
+    def test_manual_notify_requires_explicit_opt_in(self):
+        with patch.dict(os.environ, {}, clear=True):
+            allowed, reason = notify_report.notifications_allowed()
+        self.assertFalse(allowed)
+        self.assertIn("manual/local notification is disabled", reason)
+
+    def test_manual_notify_opt_in_can_notify(self):
+        with patch.dict(os.environ, {"ALLOW_MANUAL_NOTIFY": "true"}, clear=True):
+            allowed, reason = notify_report.notifications_allowed()
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
 
     def test_multipart_contains_payload_and_file(self):
         report = Path(__file__)

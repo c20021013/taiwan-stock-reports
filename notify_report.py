@@ -20,6 +20,23 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 REPORTS_DIR = ROOT / "reports"
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def notifications_allowed() -> tuple[bool, str]:
+    """Allow scheduled cloud pushes; require an explicit opt-in otherwise."""
+    if (
+        os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+    ):
+        return True, ""
+    if os.environ.get("ALLOW_MANUAL_NOTIFY", "").lower() in TRUE_VALUES:
+        return True, ""
+    return (
+        False,
+        "Notification skipped: manual/local notification is disabled. "
+        "Set ALLOW_MANUAL_NOTIFY=true to send intentionally.",
+    )
 
 
 def latest_report(mode: str) -> tuple[Path, Path]:
@@ -267,6 +284,11 @@ def notify(mode: str, dry_run: bool = False) -> int:
         )
         if line_token and line_target:
             print(f"LINE HTML URL: {report_url or 'not configured'}")
+        return 0
+
+    allowed, reason = notifications_allowed()
+    if not allowed:
+        print(reason)
         return 0
 
     sent = 0
