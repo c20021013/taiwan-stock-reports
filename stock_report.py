@@ -80,12 +80,18 @@ class Security:
     is_etf: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, float | None] = field(default_factory=dict)
+    score_breakdown: dict[str, float | None] = field(default_factory=dict)
     score: float = 0.0
     label: str = ""
     events: list[str] = field(default_factory=list)
     news_titles: list[str] = field(default_factory=list)
+    cumulative_eps: float | None = None
+    cumulative_eps_period: str = ""
     eps_yoy: float | None = None
     eps_period: str = ""
+    roe: float | None = None
+    monthly_profit: float | None = None
+    capital_adequacy: str = "資料不足"
     equity_change: float | None = None
     equity_change_pct: float | None = None
     equity_date: str = ""
@@ -521,7 +527,9 @@ def cumulative_revenue_reason(security: Security) -> str:
 
 
 def is_financial_stock(security: Security) -> bool:
-    return "金融" in security.industry
+    return "金融" in security.industry or (
+        security.symbol.isdigit() and security.symbol.startswith("28")
+    )
 
 
 def is_electronic_industry(industry: str) -> bool:
@@ -1021,6 +1029,29 @@ def cumulative_eps_metrics(
     return pct_change(current_total, previous_total), quarter_label(latest.isoformat())
 
 
+def cumulative_eps_value(
+    by_date: dict[str, dict[str, float]]
+) -> tuple[float | None, str]:
+    eps_dates = sorted(
+        row_date for row_date, values in by_date.items() if "EPS" in values
+    )
+    if not eps_dates:
+        return None, ""
+    latest = date.fromisoformat(eps_dates[-1])
+    current_dates = [
+        row_date
+        for row_date in eps_dates
+        if date.fromisoformat(row_date).year == latest.year
+        and date.fromisoformat(row_date) <= latest
+    ]
+    if not current_dates:
+        return None, quarter_label(latest.isoformat())
+    return (
+        sum(by_date[row_date]["EPS"] for row_date in current_dates),
+        quarter_label(latest.isoformat()),
+    )
+
+
 def equity_change_metrics(
     by_date: dict[str, dict[str, float]]
 ) -> tuple[float | None, float | None, str]:
@@ -1050,6 +1081,10 @@ def attach_financial_metrics(
         max_age_minutes=1440,
     )
     income_by_date = statement_values_by_date(income_rows, report_date)
+    (
+        security.cumulative_eps,
+        security.cumulative_eps_period,
+    ) = cumulative_eps_value(income_by_date)
     security.eps_yoy, security.eps_period = cumulative_eps_metrics(income_by_date)
 
     balance_rows = finmind_data(
@@ -1745,7 +1780,7 @@ def reader_guide_section(target_date: date | None = None) -> list[str]:
         "",
         f"- 先看盤前速覽與 {heading_text}，掌握大盤風向、方向機率與反證條件。",
         "- 再看國際情勢、資金健康度與籌碼，確認推估是由哪些外部事件或資金流支撐。",
-        "- 最後看建議標的，重點放在營收、重大訊息、產業催化與估值是否互相支持。",
+        "- 最後看研究名單，重點放在營收、重大訊息、產業催化與估值是否互相支持。",
         "",
     ]
 
@@ -1963,6 +1998,130 @@ def chip_section(context: ChipContext) -> list[str]:
     return lines
 
 
+def latest_date_text(values: Iterable[str]) -> str:
+    dates = [value for value in values if value]
+    return max(dates) if dates else "資料不足"
+
+
+def data_time_range_section(
+    candidates: list[Security],
+    indicators: list[InternationalIndicator],
+    health: MarketHealth,
+    chips: ChipContext,
+) -> list[str]:
+    market_dates = [item.data_date for item in candidates if item.data_date]
+    return [
+        "## 資料時間範圍",
+        "",
+        "| 資料類型 | 最新可得日期 | 備註 |",
+        "|---|---|---|",
+        f"| 台股收盤資料 | {health.data_date or latest_date_text(market_dates)} | 依 TWSE/TPEx 或最新候選標的行情資料 |",
+        f"| 三大法人資料 | {chips.institutional_date or '資料不足'} | 依 FinMind 或官方可得資料 |",
+        f"| 期貨資料 | {latest_date_text([chips.futures_date, chips.option_date])} | 含外資台指期與選擇權資料；若缺漏則降級判讀 |",
+        f"| 美股與國際指數 | {latest_date_text(indicator.latest_date for indicator in indicators)} | 依 Yahoo Finance Chart 最新可得交易日 |",
+        "| ETF iNAV | 資料不足 | 尚未取得同日官方 iNAV，折溢價不作精確買進依據 |",
+        "| 新聞事件 | 資料不足 | 目前摘要未保留逐則新聞日期，事件需回查原始來源日期 |",
+        "",
+    ]
+
+
+def market_environment_section(
+    indicators: list[InternationalIndicator],
+    health: MarketHealth,
+    chips: ChipContext,
+) -> list[str]:
+    data = indicator_map(indicators)
+    tech_indicator = data.get("sox") or data.get("nasdaq")
+    if tech_indicator:
+        tech_move = move_score(tech_indicator.change_1d, tech_indicator.change_5d)
+        if tech_move <= -2:
+            tech_status = f"偏空（{tech_indicator.name} 1日 {fmt_change(tech_indicator.change_1d)}、5日 {fmt_change(tech_indicator.change_5d)}）"
+            tech_impact = "科技股不宜追高，應等待回檔或量縮止跌"
+        elif tech_move >= 2:
+            tech_status = f"偏多（{tech_indicator.name} 1日 {fmt_change(tech_indicator.change_1d)}、5日 {fmt_change(tech_indicator.change_5d)}）"
+            tech_impact = "科技股研究名單可維持追蹤，但仍需確認估值與籌碼"
+        else:
+            tech_status = f"震盪（{tech_indicator.name} 1日 {fmt_change(tech_indicator.change_1d)}、5日 {fmt_change(tech_indicator.change_5d)}）"
+            tech_impact = "科技股不宜追高，應等待回檔或量縮止跌"
+    else:
+        tech_status = "資料不足，僅作初步參考"
+        tech_impact = "資料不足，僅作初步參考"
+
+    foreign = chips.institutional_nets.get("Foreign_Investor")
+    if foreign is None:
+        foreign_status = "資料不足，僅作初步參考"
+        foreign_impact = "資料不足，僅作初步參考"
+    elif foreign < 0:
+        foreign_status = f"外資賣超 {fmt_money_yi(abs(foreign))}"
+        foreign_impact = "降低短線積極度，避免滿倉操作"
+    elif foreign > 0:
+        foreign_status = f"外資買超 {fmt_money_yi(foreign)}"
+        foreign_impact = "研究名單可維持追蹤，但仍需搭配公司事件與估值"
+    else:
+        foreign_status = "外資現貨持平"
+        foreign_impact = "維持中性部位，等待籌碼方向更明確"
+
+    if health.electronic_ratio is None:
+        electronic_status = "資料不足，僅作初步參考"
+        electronic_impact = "資料不足，僅作初步參考"
+    elif health.electronic_ratio >= 70:
+        electronic_status = f"資金高度集中（電子成交比重 {pct_text(health.electronic_ratio)}）"
+        electronic_impact = "留意電子股過度集中與回檔風險"
+    elif health.electronic_ratio >= 60:
+        electronic_status = f"資金偏集中（電子成交比重 {pct_text(health.electronic_ratio)}）"
+        electronic_impact = "科技股仍是主軸，但不宜忽略族群輪動"
+    else:
+        electronic_status = f"未見極端集中（電子成交比重 {pct_text(health.electronic_ratio)}）"
+        electronic_impact = "可同步觀察傳產、金融或防禦型族群"
+
+    breadth_total = health.up_count + health.down_count + health.flat_count
+    if not breadth_total:
+        breadth_status = "資料不足，僅作初步參考"
+        breadth_impact = "資料不足，僅作初步參考"
+    elif health.up_count > health.down_count * 1.2:
+        breadth_status = f"漲多跌少（上漲 {health.up_count:,}、下跌 {health.down_count:,}）"
+        breadth_impact = "市場廣度較佳，仍可觀察族群輪動機會"
+    elif health.down_count > health.up_count * 1.2:
+        breadth_status = f"跌多漲少（上漲 {health.up_count:,}、下跌 {health.down_count:,}）"
+        breadth_impact = "研究名單需降低追價假設，等待轉強訊號"
+    else:
+        breadth_status = f"漲跌互見（上漲 {health.up_count:,}、下跌 {health.down_count:,}）"
+        breadth_impact = "判斷是否仍有族群輪動機會"
+
+    caution_count = sum(
+        [
+            "偏空" in tech_status or "震盪" in tech_status,
+            foreign is not None and foreign < 0,
+            health.electronic_ratio is not None and health.electronic_ratio >= 70,
+            breadth_total > 0 and health.down_count > health.up_count * 1.2,
+        ]
+    )
+    if caution_count >= 3:
+        conclusion = "中性偏保守"
+        conclusion_impact = "對所有研究名單套用較低單筆部位與更嚴格風險控管"
+    elif caution_count <= 1:
+        conclusion = "偏多"
+        conclusion_impact = "仍需分批與驗證事件，不因分數高而一次投入"
+    else:
+        conclusion = "中性"
+        conclusion_impact = "對所有研究名單套用部位與風險控管原則"
+
+    return [
+        "## 市場環境與部位原則",
+        "",
+        "> 本週研究名單代表相對優先研究順序，不代表立即進場。若大盤、國際科技股或外資籌碼偏弱，應降低單筆部位，避免追高，並等待價格回測支撐、量縮止跌或籌碼轉強後再評估。",
+        "",
+        "| 觀察項目 | 本週狀態 | 對研究名單的影響 |",
+        "|---|---|---|",
+        f"| 國際科技股 | {tech_status} | {tech_impact} |",
+        f"| 外資現貨 | {foreign_status} | {foreign_impact} |",
+        f"| 電子成交比重 | {electronic_status} | {electronic_impact} |",
+        f"| 台股市場廣度 | {breadth_status} | {breadth_impact} |",
+        f"| 綜合結論 | {conclusion} | {conclusion_impact} |",
+        "",
+    ]
+
+
 def executive_summary_section(
     indicators: list[InternationalIndicator],
     health: MarketHealth,
@@ -2028,7 +2187,7 @@ def executive_summary_section(
         if vix.latest >= 25 or (vix.change_1d or 0) >= 5:
             risk_line = (
                 f"⚠️ VIX {vix.latest:.2f}、1日 {fmt_change(vix.change_1d)}，"
-                "短線波動加劇，建議拉大分批布局間距。"
+                "短線波動加劇，應拉大分批評估間距。"
             )
         else:
             risk_line = (
@@ -2087,6 +2246,14 @@ def risk_price_text(security: Security) -> str:
     return f"{entry_low:.2f}~{security.close:.2f} / {stop:.2f}"
 
 
+def data_or_dash(value: str) -> str:
+    return value if value and value != "—" else "資料不足"
+
+
+def fmt_or_insufficient(value: float | None, suffix: str = "", digits: int = 1) -> str:
+    return fmt(value, suffix, digits) if value is not None else "資料不足"
+
+
 def stock_row_growth(security: Security) -> str:
     return (
         f"| {security.symbol} | {security.name} | {security.score:.1f} | "
@@ -2096,10 +2263,21 @@ def stock_row_growth(security: Security) -> str:
     )
 
 
+def financial_research_reason(security: Security) -> str:
+    if security.events:
+        return f"公司事件：{security.events[0]}"
+    if security.eps_yoy is not None:
+        period = f"（{security.eps_period}）" if security.eps_period else ""
+        return f"累計 EPS 年增 {security.eps_yoy:.1f}%{period}，需搭配 ROE、PB 與淨值變化判讀"
+    if security.equity_change is not None:
+        return f"淨值變化 {fmt_money_yi(security.equity_change)}，需確認股債評價與獲利來源"
+    return f"金融業研究重點：{industry_catalyst(security)}"
+
+
 def stock_row_financial(security: Security) -> str:
-    eps_yoy = fmt(security.eps_yoy, "%")
-    if security.eps_period and eps_yoy != "—":
-        eps_yoy = f"{eps_yoy} ({security.eps_period})"
+    cumulative_eps = fmt_or_insufficient(security.cumulative_eps, "", 2)
+    if security.cumulative_eps_period and cumulative_eps != "資料不足":
+        cumulative_eps = f"{cumulative_eps} ({security.cumulative_eps_period})"
     equity_change = "—"
     if security.equity_change is not None:
         equity_change = (
@@ -2111,8 +2289,13 @@ def stock_row_financial(security: Security) -> str:
             equity_change += f" ({security.equity_date})"
     return (
         f"| {security.symbol} | {security.name} | {security.score:.1f} | "
-        f"{combined_return_text(security)} | {eps_yoy} | "
-        f"{fmt(security.pb, '', 2)} | {equity_change} |"
+        f"{combined_return_text(security)} | {cumulative_eps} | "
+        f"{fmt_or_insufficient(security.roe, '%')} | "
+        f"{fmt_or_insufficient(security.pb, '', 2)} | {data_or_dash(equity_change)} | "
+        f"{fmt_or_insufficient(security.yield_pct, '%')} | "
+        f"{fmt_or_insufficient(security.monthly_profit)} | "
+        f"{security.capital_adequacy or '資料不足'} | "
+        f"{financial_research_reason(security)} |"
     )
 
 
@@ -2138,7 +2321,18 @@ def etf_exposure(security: Security) -> str:
 
 
 def etf_discount_note(security: Security) -> str:
-    return "—（未取得同日官方 iNAV，不以收盤價估算）"
+    return "資料不足（未取得同日官方 iNAV）"
+
+
+def etf_type(security: Security) -> str:
+    text = f"{security.symbol} {security.name} {etf_exposure(security)}"
+    if any(keyword in text for keyword in ("高股息", "高息", "配息")):
+        return "高股息"
+    if any(keyword in text for keyword in ("科技", "半導體", "電子", "Nasdaq", "FANG")):
+        return "科技型"
+    if any(keyword in text for keyword in ("台灣50", "大型權值", "S&P 500")):
+        return "市值型"
+    return "資料不足"
 
 
 def etf_row(security: Security) -> str:
@@ -2146,8 +2340,99 @@ def etf_row(security: Security) -> str:
     return (
         f"| {security.symbol} | {security.name} | {security.score:.1f} | "
         f"{security.label} | {combined_return_text(security)} | "
-        f"{etf_exposure(security)} | {etf_discount_note(security)} | {reason} |"
+        f"資料不足 | {etf_type(security)} | 資料不足 | {etf_discount_note(security)} | "
+        f"資料不足 | 資料不足 | {reason} |"
     )
+
+
+def score_part_text(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "—"
+
+
+def score_breakdown_row(security: Security) -> str:
+    breakdown = security.score_breakdown
+    return (
+        f"| {security.symbol} | {security.name} | "
+        f"{score_part_text(breakdown.get('營收／基本面動能'))} | "
+        f"{score_part_text(breakdown.get('籌碼面'))} | "
+        f"{score_part_text(breakdown.get('估值面'))} | "
+        f"{score_part_text(breakdown.get('技術動能'))} | "
+        f"{score_part_text(breakdown.get('事件催化'))} | "
+        f"{score_part_text(breakdown.get('風險扣分'))} | "
+        f"{security.score:.1f} |"
+    )
+
+
+def score_breakdown_section(stocks: list[Security]) -> list[str]:
+    lines = [
+        "## 分數拆解表",
+        "",
+        "> 分項分數只列出目前程式實際有計算的構面；尚未建立或無穩定資料來源的構面以「—」標示，避免捏造分數。",
+        "",
+        "| 代碼 | 名稱 | 營收／基本面動能 | 籌碼面 | 估值面 | 技術動能 | 事件催化 | 風險扣分 | 總分 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    if stocks:
+        lines.extend(score_breakdown_row(item) for item in stocks[:8])
+    else:
+        lines.append("| 資料不足 | 資料不足 | — | — | — | — | — | — | — |")
+    lines.append("")
+    return lines
+
+
+def previous_week_tracking_section() -> list[str]:
+    return [
+        "## 前週研究名單追蹤",
+        "",
+        "目前尚未串接前週研究名單資料，因此本區暫無法計算追蹤績效。建議後續加入歷史週報 JSON 或 CSV，以建立週報績效追蹤。",
+        "",
+        "| 代碼 | 名稱 | 前週分數 | 前週收盤價 | 本週收盤價 | 週報酬率 | 是否觸及風險控管價 | 本週判斷 |",
+        "|---|---|---:|---:|---:|---:|---|---|",
+        "| 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 |",
+        "",
+        "| 統計項目 | 數值 |",
+        "|---|---:|",
+        "| 前週研究名單平均報酬 | 資料不足 |",
+        "| 加權指數同期報酬 | 資料不足 |",
+        "| 相對報酬 | 資料不足 |",
+        "| 命中率 | 資料不足 |",
+        "| 最大回撤 | 資料不足 |",
+        "| 觸及風險控管價比例 | 資料不足 |",
+        "",
+    ]
+
+
+def data_quality_section() -> list[str]:
+    return [
+        "## 資料品質等級",
+        "",
+        "| 等級 | 來源類型 | 使用方式 |",
+        "|---|---|---|",
+        "| A | 交易所、櫃買中心、期交所、集保、公開資訊觀測站、公司重大訊息 | 可作為主要量化與事件依據 |",
+        "| B | 公司財報、法說會、月營收公告、官方投資人關係資料 | 可作為基本面與事件分析依據 |",
+        "| C | 主流財經媒體 | 可作為事件參考，需盡量交叉驗證 |",
+        "| D | 一般新聞、社群、論壇、未審查資料 | 僅作輔助，不應直接進入核心評分 |",
+        "| E | 無法追溯來源或無日期資料 | 不納入評分，只能列為待查 |",
+        "",
+    ]
+
+
+def exclusion_conditions_section() -> list[str]:
+    return [
+        "## 不納入條件",
+        "",
+        "> 下列條件目前先作為報告說明與後續 filter 擴充方向；若資料源尚未穩定串接，不會硬性刪除股票。",
+        "",
+        "| 條件 | 原因 |",
+        "|---|---|",
+        "| 處置股或注意股 | 波動與交易限制較高 |",
+        "| 日成交量過低 | 流動性不足，容易產生滑價 |",
+        "| 近 20 日漲幅過大且乖離過高 | 避免追高與短線回檔風險 |",
+        "| 本益比異常或無獲利但股價由題材推升 | 避免純題材股 |",
+        "| 單一新聞來源且無公司公告佐證 | 避免消息誤判 |",
+        "| 財報或營收異常但原因不明 | 避免低基期或一次性因素誤判 |",
+        "",
+    ]
 
 
 def calculate_metrics(history: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -2200,6 +2485,15 @@ def score_security(security: Security) -> None:
     if not metrics:
         security.score = 0
         security.label = "資料不足"
+        security.score_breakdown = {
+            "營收／基本面動能": None,
+            "籌碼面": None,
+            "估值面": None,
+            "技術動能": None,
+            "事件催化": None,
+            "風險扣分": None,
+            "總分": security.score,
+        }
         security.risks.append("歷史行情不足，無法形成可靠評分")
         security.reasons.append("目前缺少足夠資料，無法辨識可靠的上漲催化劑")
         return
@@ -2229,20 +2523,35 @@ def score_security(security: Security) -> None:
             clamp((trend_score / 45 * 70) + risk_score + liquidity_score, 0, 100),
             1,
         )
+        security.score_breakdown = {
+            "營收／基本面動能": None,
+            "籌碼面": None,
+            "估值面": None,
+            "技術動能": round(trend_score, 1),
+            "事件催化": None,
+            "風險扣分": None,
+            "總分": security.score,
+        }
     else:
         revenue_score = 0.0
+        has_revenue_input = False
         if security.revenue_yoy is not None:
             revenue_score += clamp((security.revenue_yoy + 10) / 40 * 18, 0, 18)
+            has_revenue_input = True
         if security.revenue_ytd_yoy is not None:
             revenue_score += clamp(
                 (security.revenue_ytd_yoy + 10) / 40 * 12, 0, 12
             )
+            has_revenue_input = True
 
         value_score = 0.0
+        has_value_input = False
         if security.pe and security.pe > 0:
             value_score += clamp((55 - security.pe) / 45 * 6, 0, 6)
+            has_value_input = True
         if security.pb and security.pb > 0:
             value_score += clamp((8 - security.pb) / 7 * 4, 0, 4)
+            has_value_input = True
 
         security.score = round(
             clamp(
@@ -2256,15 +2565,24 @@ def score_security(security: Security) -> None:
             ),
             1,
         )
+        security.score_breakdown = {
+            "營收／基本面動能": round(revenue_score, 1) if has_revenue_input else None,
+            "籌碼面": None,
+            "估值面": round(value_score, 1) if has_value_input else None,
+            "技術動能": round(trend_score, 1),
+            "事件催化": None,
+            "風險扣分": None,
+            "總分": security.score,
+        }
 
     if security.score >= 72:
-        security.label = "建議投資"
+        security.label = "高優先研究名單"
     elif security.score >= 62:
-        security.label = "建議觀察"
+        security.label = "觀察名單"
     elif security.score >= 50:
         security.label = "中性觀望"
     else:
-        security.label = "暫不建議"
+        security.label = "暫不納入"
 
     confirmed_catalyst = False
     for event in security.events[:2]:
@@ -2295,8 +2613,8 @@ def score_security(security: Security) -> None:
     security.reasons.append(f"潛在催化劑：{industry_catalyst(security)}")
 
     if not security.is_etf and not confirmed_catalyst:
-        if security.label == "建議投資":
-            security.label = "建議觀察"
+        if security.label == "高優先研究名單":
+            security.label = "觀察名單"
         security.reasons.append(
             "目前沒有可驗證的公司利多事件或明顯營收成長，不應只因價格趨勢追價"
         )
@@ -2368,6 +2686,13 @@ def fmt(value: float | None, suffix: str = "", digits: int = 1) -> str:
     return f"{value:.{digits}f}{suffix}"
 
 
+def financial_stock_warning() -> str:
+    return (
+        "金融股營收認列方式與一般產業不同，單月營收年增率不宜直接等同獲利成長。"
+        "金融股應優先搭配 EPS、ROE、PB、淨值變化、股利政策與資本適足性等資料判斷。"
+    )
+
+
 def detail_block(security: Security) -> str:
     reason_text = "；".join(security.reasons[:3])
     risk_text = "；".join(security.risks[:3])
@@ -2381,17 +2706,20 @@ def detail_block(security: Security) -> str:
         return (
             f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
             f"{security.label}\n\n"
-            f"- 建議原因：{reason_text}\n"
+            f"- 觀察理由：{reason_text}\n"
             f"- 主要風險：{risk_text}\n"
             f"- 最新收盤：{security.close:.2f}；近 20 日："
             f"{fmt(security.metrics.get('ret20'), '%')}；近 60 日："
             f"{fmt(security.metrics.get('ret60'), '%')}\n"
             f"- 主要曝險：{etf_exposure(security)}\n"
-            f"- 實際折溢價幅度：{etf_discount_note(security)}\n"
+            f"- 官方折溢價：{etf_discount_note(security)}；未取得同日官方 iNAV 時不作為進場依據。\n"
         )
     if is_financial_stock(security):
-        eps_yoy = fmt(security.eps_yoy, "%")
-        if security.eps_period and eps_yoy != "—":
+        cumulative_eps = fmt_or_insufficient(security.cumulative_eps, "", 2)
+        if security.cumulative_eps_period and cumulative_eps != "資料不足":
+            cumulative_eps += f"（{security.cumulative_eps_period}）"
+        eps_yoy = fmt_or_insufficient(security.eps_yoy, "%")
+        if security.eps_period and eps_yoy != "資料不足":
             eps_yoy += f"（{security.eps_period}）"
         equity_change = "—"
         if security.equity_change is not None:
@@ -2403,19 +2731,21 @@ def detail_block(security: Security) -> str:
         return (
             f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
             f"{security.label}\n\n"
-            f"- 建議原因：{reason_text}\n"
+            f"> {financial_stock_warning()}\n\n"
+            f"- 研究理由：{financial_research_reason(security)}\n"
             f"- 主要風險：{risk_text}\n"
             f"- 最新收盤：{security.close:.2f}；近 20 日："
             f"{fmt(security.metrics.get('ret20'), '%')}；近 60 日："
             f"{fmt(security.metrics.get('ret60'), '%')}\n"
-            f"- 累計 EPS 年增率：{eps_yoy}；股淨比 (PB)：{fmt(security.pb, '', 2)}\n"
-            f"- 淨值季變動：{equity_change}\n"
+            f"- 累計 EPS：{cumulative_eps}；累計 EPS 年增率：{eps_yoy}；ROE：{fmt_or_insufficient(security.roe, '%')}\n"
+            f"- 股淨比 (PB)：{fmt_or_insufficient(security.pb, '', 2)}；淨值變化：{data_or_dash(equity_change)}；股利殖利率：{fmt_or_insufficient(security.yield_pct, '%')}\n"
+            f"- 月獲利或累計獲利：{fmt_or_insufficient(security.monthly_profit)}；資本適足性：{security.capital_adequacy or '資料不足'}\n"
             f"{holding_line}"
         )
     return (
         f"### {security.symbol} {security.name}｜{security.score:.1f} 分｜"
         f"{security.label}\n\n"
-        f"- 建議原因：{reason_text}\n"
+        f"- 研究理由：{reason_text}\n"
         f"- 主要風險：{risk_text}\n"
         f"- 最新收盤：{security.close:.2f}；近 20 日："
         f"{fmt(security.metrics.get('ret20'), '%')}；近 60 日："
@@ -2430,7 +2760,7 @@ def detail_block(security: Security) -> str:
 def report_title(mode: str, today: date) -> str:
     if mode == "weekly":
         iso = today.isocalendar()
-        return f"台股第 {iso.week} 週研究彙整"
+        return f"台股第 {iso.week} 週研究彙整｜{iso.year}-W{iso.week:02d}"
     if mode == "weekend":
         return "台股週末雙日研究報告"
     return "台股每日研究報告"
@@ -2469,8 +2799,8 @@ def build_markdown(
         "",
         f"產生時間：{generated_at:%Y-%m-%d %H:%M}（Asia/Taipei）",
         "",
-        "> 本報告依公開資料提出一般性量化投資建議，不考慮個人財務狀況、"
-        "持倉與風險承受度；分數不代表未來報酬或保證獲利。",
+        "> 本報告依公開資料提出一般性量化研究資訊，不考慮個人財務狀況、"
+        "持倉與風險承受度；分數不代表未來報酬或保證獲利，亦不構成買賣推介。",
         "",
     ]
     if mode == "weekend":
@@ -2489,7 +2819,7 @@ def build_markdown(
         )
     intro.extend(
         [
-            "建議原因優先採用公司重大訊息、營收與可辨識的產業事件；"
+            "研究理由優先採用公司重大訊息、營收與可辨識的產業事件；"
             "技術指標只參與排序，不作為股票上漲原因。",
             "",
         ]
@@ -2504,54 +2834,85 @@ def build_markdown(
             current_forecast,
             current_target_date,
         )
+        + data_time_range_section(
+            candidates,
+            international or [],
+            health or MarketHealth(),
+            chips or ChipContext(),
+        )
         + next_session_forecast_section(current_forecast, current_target_date)
         + reader_guide_section(current_target_date)
         + international_section(international or [])
         + market_health_section(health or MarketHealth())
+        + market_environment_section(
+            international or [],
+            health or MarketHealth(),
+            chips or ChipContext(),
+        )
         + chip_section(chips or ChipContext())
         + [
-        "## 建議投資股票及原因",
+        "## 高優先研究股票及研究理由",
         "",
         "### 科技／傳產類",
         "",
-        "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 月營收年增率 (YoY) | 本益比 (PE) | 關鍵字新聞 | 建議/停損價 |",
+        "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 月營收年增率 (YoY) | 本益比 (PE) | 關鍵字新聞 | 參考進場區間 / 風險控管價 |",
         "|---|---|---:|---:|---:|---:|---|---|",
         ]
     )
-    lines.extend(stock_row_growth(item) for item in growth_stocks)
+    if growth_stocks:
+        lines.extend(stock_row_growth(item) for item in growth_stocks)
+    else:
+        lines.append("| 資料不足 | 資料不足 | — | — | 資料不足 | 資料不足 | 資料不足 | 資料不足 |")
     lines.extend(
         [
             "",
             "### 金融類個股",
             "",
-            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值季變動 (QoQ) |",
-            "|---|---|---:|---:|---:|---:|---|",
+            f"> {financial_stock_warning()}",
+            "",
+            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計 EPS | ROE | 股淨比 (PB) | 淨值變化 | 股利殖利率 | 月獲利或累計獲利 | 資本適足性 | 研究理由 |",
+            "|---|---|---:|---:|---:|---:|---:|---|---:|---:|---|---|",
         ]
     )
-    lines.extend(stock_row_financial(item) for item in financial_stocks)
+    if financial_stocks:
+        lines.extend(stock_row_financial(item) for item in financial_stocks)
+    else:
+        lines.append("| 資料不足 | 資料不足 | — | — | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 |")
+    lines.extend(score_breakdown_section(top_stocks))
     lines.extend(
         [
             "",
-            "## 建議投資 ETF 及原因",
+            "## ETF 觀察名單及研究理由",
             "",
-            "| 代碼 | 名稱 | 分數 | 建議 | 20D/60D報酬 | 主要曝險/成分股主題 | 實際折溢價幅度 (%) | 建議原因 |",
-            "|---|---|---:|---|---:|---|---|---|",
+            "> 本週未取得同日官方 iNAV，ETF 折溢價與實際合理買進價格無法完整確認，因此本區僅列為觀察名單，不作為進場依據。",
+            "",
+            "| ETF 代碼 | ETF 名稱 | 分數 | 觀察狀態 | 20D/60D報酬 | 追蹤指數 | 類型 | 近四季配息 | 官方折溢價 | 前十大成分股 | 管理費與保管費 | 觀察理由 |",
+            "|---|---|---:|---|---:|---|---|---|---|---|---|---|",
         ]
     )
-    lines.extend(etf_row(item) for item in top_etfs)
-    lines.extend(["", "## 投資建議詳情", ""])
+    if top_etfs:
+        lines.extend(etf_row(item) for item in top_etfs)
+    else:
+        lines.append("| 資料不足 | 資料不足 | — | 資料不足 | — | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 | 資料不足 |")
+    lines.extend(["", "## 個股研究摘要", ""])
     for item in [*top_stocks[:5], *top_etfs[:3]]:
         lines.append(detail_block(item))
 
     lines.extend(
+        previous_week_tracking_section()
+        + exclusion_conditions_section()
+        +
         [
             "## 使用方式",
             "",
-            "- `建議投資`：分數與事件／營運催化劑相對完整，仍應核對財報、法說與重大訊息。",
-            "- `建議觀察`：可能有產業題材，但公司事件、基本面或估值仍有缺口。",
-            "- `暫不建議`：目前風險或弱勢訊號較多。",
-            "- 建議分批布局並設定風險上限，不因單日排名改變而追價。",
+            "- `高優先研究名單`：分數與事件／營運催化劑相對完整，仍應核對財報、法說與重大訊息。",
+            "- `觀察名單`：可能有產業題材，但公司事件、基本面或估值仍有缺口。",
+            "- `暫不納入`：目前風險或弱勢訊號較多。",
+            "- 若評估進場，應分批並設定風險上限，不因單日排名改變而追價。",
             "",
+        ]
+        + data_quality_section()
+        + [
             "## 資料來源與限制",
             "",
             "- TWSE OpenAPI：上市行情、估值、月營收與每日重大訊息。",
@@ -2561,6 +2922,7 @@ def build_markdown(
             "- FinMind：個股與 ETF 歷史日行情、新聞、三大法人、期貨選擇權、融資融券與財報欄位。",
             "- Yahoo Finance Chart：美股指數、半導體、匯率、利率與商品價格。",
             "- 免費資料可能延遲、缺漏或更正；交易前應核對公開資訊觀測站與交易所。",
+            "- 若資料來源缺乏明確日期、官方連結或可追溯來源，本報告不應將其作為核心評分依據。",
             "",
         ]
     )
@@ -2779,7 +3141,7 @@ def finance_report_dashboard(
     <article class="dashboard-panel"><div class="panel-heading"><p>Highlights</p><h2>本期重點</h2></div><ol class="highlight-list">{''.join(f'<li>{html.escape(item)}</li>' for item in highlights)}</ol></article>
     <article class="dashboard-panel"><div class="panel-heading"><p>Outlook</p><h2>下期觀察</h2></div><p class="outlook-copy">{html.escape(outlook)}</p></article>
   </section>
-  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；投資原因優先採公司重大訊息、營收與產業事件。目標交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、期貨盤後盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
+  <details class="methodology"><summary>方法論與資料限制</summary><p>候選排序綜合營收、估值、流動性、波動與價格資料；研究理由優先採公司重大訊息、營收與產業事件。目標交易日機率使用國際盤、台股市場廣度、外資現貨、外資台指期、期貨盤後盤與匯率建立規則型情境分數；平盤定義為收盤漲跌介於 ±0.3%，單一方向機率上限為 60%，模型不預測點位，也不保證報酬。均線、短期報酬與成交量只參與排序，不作為股價上漲原因。資料源包括 TWSE、TPEx、TAIFEX、TDCC、FinMind 與 Yahoo Finance，可能延遲、缺漏或修正，交易前請核對公司公告與正式財報。</p></details>
 </section>
 """
 
@@ -2941,11 +3303,12 @@ def run(mode: str) -> tuple[Path, Path]:
     dashboard = finance_report_dashboard(
         title, mode, candidates, generated_at, health, chips, forecast, target_date
     )
-    html_path.write_text(markdown_to_html(markdown, title, dashboard), encoding="utf-8")
+    html_content = markdown_to_html(markdown, title, dashboard)
+    html_path.write_text(html_content, encoding="utf-8")
     (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")
-    (REPORTS_DIR / "latest.html").write_text(
-        markdown_to_html(markdown, title, dashboard), encoding="utf-8"
-    )
+    (REPORTS_DIR / "latest.html").write_text(html_content, encoding="utf-8")
+    (REPORTS_DIR / mode / "latest.html").write_text(html_content, encoding="utf-8")
+    (ROOT / "index.html").write_text(html_content, encoding="utf-8")
     return md_path, html_path
 
 

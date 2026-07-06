@@ -61,12 +61,20 @@ def validate(mode: str) -> list[str]:
         "## 國際情勢與台股影響",
         "## 2.5 台股大盤與資金健康度",
         "## 2.6 籌碼與信用交易動態",
-        "## 建議投資 ETF 及原因",
+        "## 市場環境與部位原則",
+        "## 高優先研究股票及研究理由",
+        "## 分數拆解表",
+        "## ETF 觀察名單及研究理由",
+        "## 前週研究名單追蹤",
+        "## 資料品質等級",
+        "## 不納入條件",
+        "## 資料時間範圍",
         "月營收年增率 (YoY)",
         "本益比 (PE)",
         "股淨比 (PB)",
-        "淨值季變動 (QoQ)",
-        "實際折溢價幅度 (%)",
+        "淨值變化",
+        "官方折溢價",
+        "本週未取得同日官方 iNAV",
         "非純散戶",
         "市場行情資料日",
         "TAIFEX OpenAPI",
@@ -83,6 +91,18 @@ def validate(mode: str) -> list[str]:
         errors.append("Missing bold emphasis in Markdown or HTML")
     if "QQ" in markdown or "OCI／淨值變動" in markdown:
         errors.append("Ambiguous financial terminology is present")
+    forbidden_terms = [
+        "建議投資",
+        "建議觀察",
+        "暫不建議",
+        "投資建議詳情",
+        "建議/停損價",
+        "建議買進價",
+        "停損價",
+    ]
+    for term in forbidden_terms:
+        if term in markdown:
+            errors.append(f"Forbidden investment-style term is present: {term}")
     if "股市爆料同學會" in markdown or "CMoney投資網誌" in markdown:
         errors.append("Low-quality forum news is present")
 
@@ -136,20 +156,23 @@ def validate(mode: str) -> list[str]:
 
     try:
         etf_section = section(
-            markdown, "## 建議投資 ETF 及原因", "## 投資建議詳情"
+            markdown, "## ETF 觀察名單及研究理由", "## 個股研究摘要"
         )
         if "月營收YoY" in etf_section or "| PE |" in etf_section:
             errors.append("ETF table still contains stock-only columns")
         if (
-            "主要曝險/成分股主題" not in etf_section
-            or "實際折溢價幅度 (%)" not in etf_section
+            "追蹤指數" not in etf_section
+            or "官方折溢價" not in etf_section
+            or "前十大成分股" not in etf_section
         ):
             errors.append("ETF table is missing ETF-specific columns")
+        if "不作為進場依據" not in etf_section:
+            errors.append("ETF iNAV limitation warning is missing")
     except AssertionError as exc:
         errors.append(str(exc))
 
     try:
-        details_section = section(markdown, "## 投資建議詳情", "## 使用方式")
+        details_section = section(markdown, "## 個股研究摘要", "## 前週研究名單追蹤")
         etf_detail_blocks = [
             block
             for block in details_section.split("\n### ")
@@ -165,7 +188,7 @@ def validate(mode: str) -> list[str]:
     if report_date:
         try:
             dated_sections = section(
-                markdown, "## 2.5 台股大盤與資金健康度", "## 建議投資股票及原因"
+                markdown, "## 2.5 台股大盤與資金健康度", "## 高優先研究股票及研究理由"
             )
             for found in re.findall(r"20\d{2}-\d{2}-\d{2}", dated_sections):
                 if date.fromisoformat(found) > report_date:

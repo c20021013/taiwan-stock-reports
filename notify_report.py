@@ -101,8 +101,8 @@ def build_summary(markdown: str, mode: str) -> str:
     if not tldr:
         tldr = parse_list_items(markdown, "## 今日盤後速覽 (TL;DR)", 3)
     international = parse_list_items(markdown, "## 國際情勢與台股影響", 3)
-    stocks = parse_table(markdown, "## 建議投資股票及原因", 3)
-    etfs = parse_table(markdown, "## 建議投資 ETF 及原因", 2)
+    stocks = parse_table(markdown, "## 高優先研究股票及研究理由", 3)
+    etfs = parse_table(markdown, "## ETF 觀察名單及研究理由", 2)
     lines = [title, ""]
     if tldr:
         lines.append("盤前速覽（以前一交易日資料為主）")
@@ -115,26 +115,26 @@ def build_summary(markdown: str, mode: str) -> str:
             lines.append(f"- {item}")
         lines.append("")
     if stocks:
-        lines.append("建議投資股票及原因")
+        lines.append("高優先研究股票及研究理由")
         for row in stocks:
             lines.append(
                 f"- {row.get('代碼')} {row.get('名稱')}｜{row.get('分數')} 分｜"
                 f"{row.get('20D/60D報酬') or row.get('20日報酬') or row.get('20日')}｜"
-                f"{row.get('建議原因') or row.get('關鍵字新聞') or row.get('淨值變動') or row.get('OCI／淨值變動')}"
+                f"{row.get('研究理由') or row.get('關鍵字新聞') or row.get('淨值變化') or row.get('淨值變動') or row.get('OCI／淨值變動')}"
             )
     if etfs:
-        lines.extend(["", "建議投資 ETF 及原因"])
+        lines.extend(["", "ETF 觀察名單及研究理由"])
         for row in etfs:
             lines.append(
-                f"- {row.get('代碼')} {row.get('名稱')}｜{row.get('分數')} 分｜"
-                f"{row.get('20D/60D報酬') or row.get('20日報酬') or row.get('20日')}｜{row.get('建議原因')}"
+                f"- {row.get('ETF 代碼') or row.get('代碼')} {row.get('ETF 名稱') or row.get('名稱')}｜{row.get('分數')} 分｜"
+                f"{row.get('20D/60D報酬') or row.get('20日報酬') or row.get('20日')}｜{row.get('觀察理由')}"
             )
     if mode == "weekly":
         lines.extend(["", "週末／週報使用最近交易日資料。"])
     lines.extend(
         [
             "",
-            "本內容是依公開資料產生的一般性量化建議，"
+            "本內容是依公開資料產生的一般性量化研究資訊，"
             "不考慮個人財務狀況，亦不保證獲利。",
         ]
     )

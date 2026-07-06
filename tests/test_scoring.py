@@ -156,7 +156,7 @@ class ScoringTests(unittest.TestCase):
         security.metrics = stock_report.calculate_metrics(history)
         stock_report.score_security(security)
 
-        self.assertNotEqual(security.label, "建議投資")
+        self.assertNotEqual(security.label, "高優先研究名單")
         self.assertTrue(
             any("沒有可驗證" in reason for reason in security.reasons)
         )
@@ -661,7 +661,7 @@ class ScoringTests(unittest.TestCase):
         )
         etf.metrics = {"ret20": 25.0, "ret60": 45.0, "volatility20": 20.0}
         etf.score = 75.0
-        etf.label = "建議投資"
+        etf.label = "觀察名單"
         etf.reasons = ["AI 與半導體需求帶動大型權值股獲利預期"]
         etf.risks = ["折溢價過高時降低買進效率"]
 
@@ -673,20 +673,22 @@ class ScoringTests(unittest.TestCase):
             stock_report.MarketHealth(),
             stock_report.ChipContext(),
         )
-        etf_section = markdown.split("## 建議投資 ETF 及原因", 1)[1].split(
-            "## 投資建議詳情", 1
+        etf_section = markdown.split("## ETF 觀察名單及研究理由", 1)[1].split(
+            "## 個股研究摘要", 1
         )[0]
 
-        self.assertIn("主要曝險/成分股主題", etf_section)
-        self.assertIn("實際折溢價幅度 (%)", etf_section)
+        self.assertIn("追蹤指數", etf_section)
+        self.assertIn("官方折溢價", etf_section)
         self.assertIn("未取得同日官方 iNAV", etf_section)
         self.assertIn("**25.0%** / **45.0%**", etf_section)
         self.assertNotIn("月營收YoY", etf_section)
         self.assertNotIn("| PE |", etf_section)
 
-        detail_section = markdown.split("## 投資建議詳情", 1)[1]
+        detail_section = markdown.split("## 個股研究摘要", 1)[1].split(
+            "## 前週研究名單追蹤", 1
+        )[0]
         self.assertIn("主要曝險", detail_section)
-        self.assertIn("實際折溢價幅度", detail_section)
+        self.assertIn("官方折溢價", detail_section)
         self.assertNotIn("月營收年增", detail_section)
         self.assertNotIn("本益比", detail_section)
 
@@ -704,7 +706,7 @@ class ScoringTests(unittest.TestCase):
         )
         financial.metrics = {"ret20": 2.0, "ret60": 3.0, "volatility20": 20.0}
         financial.score = 70.0
-        financial.label = "建議投資"
+        financial.label = "高優先研究名單"
         financial.reasons = ["利差擴大可能推升金融業獲利"]
         financial.risks = ["股債市場波動影響淨值"]
 
@@ -718,13 +720,123 @@ class ScoringTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計EPS年增率 (YoY) | 股淨比 (PB) | 淨值季變動 (QoQ) |",
+            "| 代碼 | 名稱 | 分數 | 20D/60D報酬 | 累計 EPS | ROE | 股淨比 (PB) | 淨值變化 | 股利殖利率 | 月獲利或累計獲利 | 資本適足性 | 研究理由 |",
             markdown,
         )
         self.assertIn("本益比 (PE)", markdown)
         self.assertIn("月營收年增率 (YoY)", markdown)
+        self.assertIn(stock_report.financial_stock_warning(), markdown)
+        self.assertIn("月獲利或累計獲利", markdown)
+        self.assertIn("資本適足性", markdown)
         self.assertNotIn("OCI／淨值變動", markdown)
         self.assertNotIn("QQ", markdown)
+
+    def test_weekly_report_includes_research_governance_sections(self):
+        stock = stock_report.Security(
+            "2330",
+            "台積電",
+            "TWSE",
+            1000,
+            10,
+            1_000_000,
+            100_000_000,
+            pe=25,
+            revenue_yoy=25,
+            revenue_ytd_yoy=18,
+            industry="半導體業",
+            data_date="2026-07-03",
+        )
+        stock.metrics = {
+            "latest": 1000,
+            "ma20": 900,
+            "ma60": 850,
+            "ret20": 8.0,
+            "ret60": 20.0,
+            "drawdown60": -3.0,
+            "volatility20": 20.0,
+            "volume_ratio": 1.1,
+        }
+        stock_report.score_security(stock)
+
+        etf = stock_report.Security(
+            "0050",
+            "元大台灣50",
+            "TWSE",
+            200,
+            1,
+            1_000_000,
+            100_000_000,
+            is_etf=True,
+            data_date="2026-07-03",
+        )
+        etf.metrics = {
+            "latest": 200,
+            "ma20": 190,
+            "ma60": 180,
+            "ret20": 5.0,
+            "ret60": 12.0,
+            "drawdown60": -2.0,
+            "volatility20": 18.0,
+            "volume_ratio": 1.0,
+        }
+        stock_report.score_security(etf)
+
+        indicator = stock_report.InternationalIndicator(
+            key="sox",
+            name="費城半導體指數",
+            symbol="^SOX",
+            latest=5000,
+            latest_date="2026-07-03",
+            change_1d=-1.0,
+            change_5d=-4.0,
+            unit="點",
+        )
+        health = stock_report.MarketHealth(
+            data_date="2026-07-03",
+            electronic_ratio=72.0,
+            financial_ratio=8.0,
+            traditional_ratio=20.0,
+            up_count=500,
+            down_count=900,
+            flat_count=80,
+            above_ma20_count=1,
+            above_ma20_total=1,
+        )
+        chips = stock_report.ChipContext(
+            institutional_date="2026-07-03",
+            institutional_nets={"Foreign_Investor": -10_000_000_000},
+            futures_date="2026-07-03",
+        )
+        markdown = stock_report.build_markdown(
+            "weekly",
+            [stock, etf],
+            datetime(2026, 7, 6, 21, 0, tzinfo=stock_report.TAIPEI_TZ),
+            [indicator],
+            health,
+            chips,
+        )
+
+        for heading in (
+            "## 資料時間範圍",
+            "## 市場環境與部位原則",
+            "## 高優先研究股票及研究理由",
+            "## 分數拆解表",
+            "## ETF 觀察名單及研究理由",
+            "## 前週研究名單追蹤",
+            "## 資料品質等級",
+            "## 不納入條件",
+        ):
+            self.assertIn(heading, markdown)
+        self.assertIn("台股第 28 週研究彙整｜2026-W28", markdown)
+        self.assertIn("本週研究名單代表相對優先研究順序", markdown)
+        self.assertIn("不作為進場依據", markdown)
+        self.assertIn("| 2330 | 台積電 |", markdown)
+        self.assertIn("| 0050 | 元大台灣50 |", markdown)
+        self.assertIn("| 籌碼面 |", markdown)
+        self.assertIn("目前尚未串接前週研究名單資料", markdown)
+        self.assertIn("若資料來源缺乏明確日期", markdown)
+        self.assertNotIn("建議投資", markdown)
+        self.assertNotIn("投資建議詳情", markdown)
 
     def test_markdown_to_html_renders_bold_numbers(self):
         html = stock_report.markdown_to_html(
@@ -748,7 +860,7 @@ class ScoringTests(unittest.TestCase):
             revenue_ytd_yoy=18,
         )
         security.score = 80
-        security.label = "建議投資"
+        security.label = "高優先研究名單"
         security.reasons = ["公司事件：先進製程需求增加"]
         health = stock_report.MarketHealth(
             electronic_ratio=60,
