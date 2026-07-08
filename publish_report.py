@@ -25,6 +25,23 @@ REQUIRED_CURRENT_REPORT_MARKERS = (
     "Next Trading Day",
     "方向機率",
 )
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def publish_allowed() -> tuple[bool, str]:
+    """Allow scheduled cloud publishes; require explicit opt-in otherwise."""
+    if (
+        os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+    ):
+        return True, ""
+    if os.environ.get("ALLOW_MANUAL_PUBLISH", "").strip().lower() in TRUE_VALUES:
+        return True, ""
+    return (
+        False,
+        "GitHub publish skipped: manual/local publish is disabled. "
+        "Set ALLOW_MANUAL_PUBLISH=true to publish intentionally.",
+    )
 
 
 def request_json(
@@ -187,6 +204,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    allowed, reason = publish_allowed()
+    if not allowed:
+        print(reason)
+        return 0
     token = os.environ.get("GITHUB_REPORT_TOKEN", "").strip()
     repository = os.environ.get(
         "GITHUB_REPORT_REPOSITORY", DEFAULT_REPOSITORY

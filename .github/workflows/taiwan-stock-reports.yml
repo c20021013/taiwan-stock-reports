@@ -16,6 +16,11 @@ on:
         required: true
         default: false
         type: boolean
+      publish:
+        description: Publish this manual run to GitHub Pages
+        required: true
+        default: false
+        type: boolean
   schedule:
     # Start early in the cloud, then wait until Asia/Taipei 08:00.
     - cron: "0 22 * * 0-4"
@@ -120,6 +125,8 @@ jobs:
 
       - name: Publish HTML to GitHub Pages repository
         continue-on-error: true
+        env:
+          ALLOW_MANUAL_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || '' }}
         run: python publish_report.py --mode "${{ steps.mode.outputs.mode }}"
 
       - name: Send notification

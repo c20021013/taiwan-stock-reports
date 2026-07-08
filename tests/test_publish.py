@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import publish_report
 
@@ -50,6 +51,32 @@ class PublishTests(unittest.TestCase):
             publish_report.latest_alias_paths("reports/latest.html"),
             ["index.html", "reports/latest.html"],
         )
+
+    def test_scheduled_github_action_can_publish(self):
+        env = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "schedule",
+        }
+        with patch.dict(publish_report.os.environ, env, clear=True):
+            allowed, reason = publish_report.publish_allowed()
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
+
+    def test_manual_publish_requires_explicit_opt_in(self):
+        with patch.dict(publish_report.os.environ, {}, clear=True):
+            allowed, reason = publish_report.publish_allowed()
+        self.assertFalse(allowed)
+        self.assertIn("manual/local publish is disabled", reason)
+
+    def test_manual_publish_opt_in_can_publish(self):
+        with patch.dict(
+            publish_report.os.environ,
+            {"ALLOW_MANUAL_PUBLISH": "true"},
+            clear=True,
+        ):
+            allowed, reason = publish_report.publish_allowed()
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
 
 
 if __name__ == "__main__":

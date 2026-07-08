@@ -60,6 +60,7 @@ TAIFEX_INSTITUTIONAL_URL = (
     "MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate"
 )
 TAIFEX_DAILY_FUTURES_URL = "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -190,6 +191,10 @@ def load_config() -> dict[str, Any]:
 def ensure_dirs() -> None:
     REPORTS_DIR.mkdir(exist_ok=True)
     CACHE_DIR.mkdir(exist_ok=True)
+
+
+def update_report_aliases_enabled() -> bool:
+    return os.environ.get("UPDATE_REPORT_ALIASES", "").strip().lower() in TRUE_VALUES
 
 
 def _fetch_json_legacy(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
@@ -3305,10 +3310,13 @@ def run(mode: str) -> tuple[Path, Path]:
     )
     html_content = markdown_to_html(markdown, title, dashboard)
     html_path.write_text(html_content, encoding="utf-8")
-    (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")
-    (REPORTS_DIR / "latest.html").write_text(html_content, encoding="utf-8")
-    (REPORTS_DIR / mode / "latest.html").write_text(html_content, encoding="utf-8")
-    (ROOT / "index.html").write_text(html_content, encoding="utf-8")
+    if update_report_aliases_enabled():
+        (REPORTS_DIR / "latest.md").write_text(markdown, encoding="utf-8")
+        (REPORTS_DIR / "latest.html").write_text(html_content, encoding="utf-8")
+        (REPORTS_DIR / mode / "latest.html").write_text(
+            html_content, encoding="utf-8"
+        )
+        (ROOT / "index.html").write_text(html_content, encoding="utf-8")
     return md_path, html_path
 
 

@@ -6,6 +6,16 @@ import stock_report
 
 
 class ScoringTests(unittest.TestCase):
+    def test_local_alias_updates_require_explicit_opt_in(self):
+        with mock.patch.dict(stock_report.os.environ, {}, clear=True):
+            self.assertFalse(stock_report.update_report_aliases_enabled())
+        with mock.patch.dict(
+            stock_report.os.environ,
+            {"UPDATE_REPORT_ALIASES": "true"},
+            clear=True,
+        ):
+            self.assertTrue(stock_report.update_report_aliases_enabled())
+
     def test_calculate_metrics_for_rising_prices(self):
         history = [
             {"close": 100 + index, "Trading_Volume": 1000 + index * 10}
