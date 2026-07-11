@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import publish_report
@@ -17,6 +18,21 @@ class PublishTests(unittest.TestCase):
         path = publish_report.latest_report("daily")
         self.assertEqual(path.suffix, ".html")
         self.assertTrue(path.is_relative_to(Path(publish_report.REPORTS_DIR)))
+
+    def test_latest_report_ignores_latest_alias(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            daily_dir = root / "daily"
+            daily_dir.mkdir()
+            (daily_dir / "latest.html").write_text("old alias", encoding="utf-8")
+            expected = daily_dir / "2026-07-10.html"
+            expected.write_text("new archive", encoding="utf-8")
+            (daily_dir / "2026-07-09.html").write_text(
+                "older archive", encoding="utf-8"
+            )
+
+            with patch.object(publish_report, "REPORTS_DIR", root):
+                self.assertEqual(publish_report.latest_report("daily"), expected)
 
     def test_current_report_validation_accepts_full_report(self):
         content = """

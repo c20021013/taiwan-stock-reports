@@ -104,7 +104,11 @@ def put_text_file(
 
 def latest_report(mode: str) -> Path:
     folder = REPORTS_DIR / mode
-    files = sorted(folder.glob("*.html"), key=lambda path: path.name, reverse=True)
+    files = sorted(
+        (path for path in folder.glob("*.html") if path.name != "latest.html"),
+        key=lambda path: path.name,
+        reverse=True,
+    )
     if not files:
         raise FileNotFoundError(f"找不到 {folder} 內的 HTML 報告")
     return files[0]

@@ -16,6 +16,28 @@ class ScoringTests(unittest.TestCase):
         ):
             self.assertTrue(stock_report.update_report_aliases_enabled())
 
+    def test_scheduled_github_action_updates_aliases(self):
+        with mock.patch.dict(
+            stock_report.os.environ,
+            {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "schedule"},
+            clear=True,
+        ):
+            self.assertTrue(stock_report.update_report_aliases_enabled())
+
+    def test_report_generated_at_env_accepts_date(self):
+        with mock.patch.dict(
+            stock_report.os.environ,
+            {"REPORT_GENERATED_AT": "2026-07-10"},
+            clear=True,
+        ):
+            self.assertEqual(
+                stock_report.current_generated_at(),
+                datetime(2026, 7, 10, 8, 0, tzinfo=stock_report.TAIPEI_TZ),
+            )
+
+    def test_markdown_cell_escapes_pipe_for_tables(self):
+        self.assertEqual(stock_report.markdown_cell("新聞 | 權證"), "新聞 ｜ 權證")
+
     def test_calculate_metrics_for_rising_prices(self):
         history = [
             {"close": 100 + index, "Trading_Volume": 1000 + index * 10}

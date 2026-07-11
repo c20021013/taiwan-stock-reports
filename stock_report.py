@@ -193,8 +193,39 @@ def ensure_dirs() -> None:
     CACHE_DIR.mkdir(exist_ok=True)
 
 
+def is_scheduled_github_action() -> bool:
+    return (
+        os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+        and os.environ.get("GITHUB_EVENT_NAME", "").strip() == "schedule"
+    )
+
+
 def update_report_aliases_enabled() -> bool:
-    return os.environ.get("UPDATE_REPORT_ALIASES", "").strip().lower() in TRUE_VALUES
+    return is_scheduled_github_action() or (
+        os.environ.get("UPDATE_REPORT_ALIASES", "").strip().lower() in TRUE_VALUES
+    )
+
+
+def current_generated_at() -> datetime:
+    raw = os.environ.get("REPORT_GENERATED_AT", "").strip()
+    if not raw:
+        return datetime.now(TAIPEI_TZ)
+
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        if "T" in normalized or " " in normalized:
+            parsed = datetime.fromisoformat(normalized)
+        else:
+            parsed = datetime.fromisoformat(f"{normalized}T08:00:00")
+    except ValueError as exc:
+        raise ValueError(
+            "REPORT_GENERATED_AT must be an ISO date or datetime, "
+            "for example 2026-07-10 or 2026-07-10T08:00:00+08:00"
+        ) from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TAIPEI_TZ)
+    return parsed.astimezone(TAIPEI_TZ)
 
 
 def _fetch_json_legacy(url: str, cache_name: str, max_age_minutes: int = 30) -> Any:
@@ -2230,6 +2261,10 @@ def fmt_return(value: float | None, threshold: float) -> str:
     return strong_if(text, value is not None and value >= threshold)
 
 
+def markdown_cell(value: Any) -> str:
+    return str(value).replace("|", "｜").replace("\r", " ").replace("\n", " ")
+
+
 def combined_return_text(security: Security) -> str:
     m = security.metrics
     return f"{fmt_return(m.get('ret20'), 20.0)} / {fmt_return(m.get('ret60'), 40.0)}"
@@ -2261,9 +2296,9 @@ def fmt_or_insufficient(value: float | None, suffix: str = "", digits: int = 1) 
 
 def stock_row_growth(security: Security) -> str:
     return (
-        f"| {security.symbol} | {security.name} | {security.score:.1f} | "
+        f"| {markdown_cell(security.symbol)} | {markdown_cell(security.name)} | {security.score:.1f} | "
         f"{combined_return_text(security)} | {fmt(security.revenue_yoy, '%')} | "
-        f"{fmt(security.pe, '', 1)} | {keyword_news(security)} | "
+        f"{fmt(security.pe, '', 1)} | {markdown_cell(keyword_news(security))} | "
         f"{risk_price_text(security)} |"
     )
 
@@ -2293,14 +2328,14 @@ def stock_row_financial(security: Security) -> str:
         if security.equity_date:
             equity_change += f" ({security.equity_date})"
     return (
-        f"| {security.symbol} | {security.name} | {security.score:.1f} | "
+        f"| {markdown_cell(security.symbol)} | {markdown_cell(security.name)} | {security.score:.1f} | "
         f"{combined_return_text(security)} | {cumulative_eps} | "
         f"{fmt_or_insufficient(security.roe, '%')} | "
         f"{fmt_or_insufficient(security.pb, '', 2)} | {data_or_dash(equity_change)} | "
         f"{fmt_or_insufficient(security.yield_pct, '%')} | "
         f"{fmt_or_insufficient(security.monthly_profit)} | "
         f"{security.capital_adequacy or '資料不足'} | "
-        f"{financial_research_reason(security)} |"
+        f"{markdown_cell(financial_research_reason(security))} |"
     )
 
 
@@ -2342,9 +2377,10 @@ def etf_type(security: Security) -> str:
 
 def etf_row(security: Security) -> str:
     reason = security.reasons[0] if security.reasons else etf_exposure(security)
+    reason = markdown_cell(reason)
     return (
-        f"| {security.symbol} | {security.name} | {security.score:.1f} | "
-        f"{security.label} | {combined_return_text(security)} | "
+        f"| {markdown_cell(security.symbol)} | {markdown_cell(security.name)} | {security.score:.1f} | "
+        f"{markdown_cell(security.label)} | {combined_return_text(security)} | "
         f"資料不足 | {etf_type(security)} | 資料不足 | {etf_discount_note(security)} | "
         f"資料不足 | 資料不足 | {reason} |"
     )
@@ -2357,7 +2393,7 @@ def score_part_text(value: float | None) -> str:
 def score_breakdown_row(security: Security) -> str:
     breakdown = security.score_breakdown
     return (
-        f"| {security.symbol} | {security.name} | "
+        f"| {markdown_cell(security.symbol)} | {markdown_cell(security.name)} | "
         f"{score_part_text(breakdown.get('營收／基本面動能'))} | "
         f"{score_part_text(breakdown.get('籌碼面'))} | "
         f"{score_part_text(breakdown.get('估值面'))} | "
@@ -3271,7 +3307,7 @@ def output_paths(mode: str, today: date) -> tuple[Path, Path]:
 
 
 def run(mode: str) -> tuple[Path, Path]:
-    generated_at = datetime.now(TAIPEI_TZ)
+    generated_at = current_generated_at()
     report_date = generated_at.date()
     target_date = official_target_trading_day(generated_at)
     config = load_config()
